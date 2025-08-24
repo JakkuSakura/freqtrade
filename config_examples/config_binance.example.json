@@ -33,7 +33,13 @@
         "name": "binance",
         "key": "your_exchange_key",
         "secret": "your_exchange_secret",
-        "ccxt_config": {},
+        "ccxt_config": {
+          "options": {
+            "portfolioMargin": "True",
+            "defaultType": "future",
+            "marginMode": "cross"
+          }
+        },
         "ccxt_async_config": {
         },
         "pair_whitelist": [

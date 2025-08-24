@@ -10,6 +10,7 @@ class TradingMode(str, Enum):
     SPOT = "spot"
     MARGIN = "margin"
     FUTURES = "futures"
+    PORTFOLIO_MARGIN = "portfolio_margin"
 
     def __str__(self):
         return f"{self.name.lower()}"

@@ -1740,7 +1740,7 @@ class Exchange:
         If no pair is given, all positions are returned.
         :param pair: Pair for the query
         """
-        if self._config["dry_run"] or self.trading_mode != TradingMode.FUTURES:
+        if self._config["dry_run"] or self.trading_mode not in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             return []
         try:
             symbols = []

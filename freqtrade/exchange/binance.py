@@ -3,21 +3,23 @@
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import ccxt
 from pandas import DataFrame
 
-from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS
+from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS, BuySell
 from freqtrade.enums import CandleType, MarginMode, PriceType, TradingMode
-from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError
+from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError, InvalidOrderException, \
+    RetryableOrderError
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.binance_public_data import (
     concat_safe,
     download_archive_ohlcv,
     download_archive_trades,
 )
-from freqtrade.exchange.common import retrier
-from freqtrade.exchange.exchange_types import FtHas, Tickers
+from freqtrade.exchange.common import retrier, API_FETCH_ORDER_RETRY_COUNT
+from freqtrade.exchange.exchange_types import FtHas, Tickers, CcxtBalances, CcxtPosition, CcxtOrder
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
 from freqtrade.misc import deep_merge_dicts, json_load
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
@@ -40,6 +42,7 @@ class Binance(Exchange):
         "fetch_orders_limit_minutes": None,
         "l2_limit_range": [5, 10, 20, 50, 100, 500, 1000],
         "ws_enabled": True,
+        "ccxt_futures_name": "swap",
     }
     _ft_has_futures: FtHas = {
         "funding_fee_candle_limit": 1000,
@@ -61,12 +64,35 @@ class Binance(Exchange):
             "BFUSD": "USDT",
         },
     }
+    
+    _ft_has_portfolio_margin: FtHas = {
+        # Portfolio margin uses the same settings as futures
+        "funding_fee_candle_limit": 1000,
+        "stoploss_order_types": {"limit": "stop", "market": "stop_market"},
+        "stoploss_blocks_assets": False,
+        "order_time_in_force": ["GTC", "FOK", "IOC"],
+        "tickers_have_price": False,
+        "floor_leverage": True,
+        "fetch_orders_limit_minutes": 7 * 1440,
+        "stop_price_type_field": "workingType",
+        "order_props_in_contracts": ["amount", "cost", "filled", "remaining"],
+        "stop_price_type_value_mapping": {
+            PriceType.LAST: "CONTRACT_PRICE",
+            PriceType.MARK: "MARK_PRICE",
+        },
+        "ws_enabled": False,
+        "proxy_coin_mapping": {
+            "BNFCR": "USDC",
+            "BFUSD": "USDT",
+        },
+    }
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
         (TradingMode.SPOT, MarginMode.NONE),
         # (TradingMode.MARGIN, MarginMode.CROSS),
         (TradingMode.FUTURES, MarginMode.CROSS),
         (TradingMode.FUTURES, MarginMode.ISOLATED),
+        (TradingMode.PORTFOLIO_MARGIN, MarginMode.CROSS),
     ]
 
     def get_proxy_coin(self) -> str:
@@ -90,7 +116,7 @@ class Binance(Exchange):
         market_type: TradingMode | None = None,
     ) -> Tickers:
         tickers = super().get_tickers(symbols=symbols, cached=cached, market_type=market_type)
-        if self.trading_mode == TradingMode.FUTURES:
+        if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             # Binance's future result has no bid/ask values.
             # Therefore we must fetch that from fetch_bids_asks and combine the two results.
             bidsasks = self.fetch_bids_asks(symbols, cached=cached)
@@ -105,25 +131,40 @@ class Binance(Exchange):
         Must be overridden in child methods if required.
         """
         try:
-            if self.trading_mode == TradingMode.FUTURES and not self._config["dry_run"]:
+            # For both futures and portfolio margin, we need to check position mode settings
+            if (self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN) 
+                and not self._config["dry_run"]):
                 position_side = self._api.fapiPrivateGetPositionSideDual()
                 self._log_exchange_response("position_side_setting", position_side)
                 assets_margin = self._api.fapiPrivateGetMultiAssetsMargin()
                 self._log_exchange_response("multi_asset_margin", assets_margin)
                 msg = ""
+                
                 if position_side.get("dualSidePosition") is True:
                     msg += (
                         "\nHedge Mode is not supported by freqtrade. "
                         "Please change 'Position Mode' on your binance futures account."
                     )
-                if (
-                    assets_margin.get("multiAssetsMargin") is True
-                    and self.margin_mode != MarginMode.CROSS
-                ):
-                    msg += (
-                        "\nMulti-Asset Mode is not supported by freqtrade. "
-                        "Please change 'Asset Mode' on your binance futures account."
-                    )
+                
+                # For portfolio margin, multiAssetsMargin should be enabled
+                if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+                    # Portfolio margin requires multi-asset mode to be enabled
+                    if assets_margin.get("multiAssetsMargin") is False:
+                        msg += (
+                            "\nPortfolio Margin requires Multi-Asset Mode to be enabled. "
+                            "Please change 'Asset Mode' on your binance futures account."
+                        )
+                else:
+                    # For regular futures with isolated margin, multi-asset margin should be disabled
+                    if (
+                        assets_margin.get("multiAssetsMargin") is True
+                        and self.margin_mode != MarginMode.CROSS
+                    ):
+                        msg += (
+                            "\nMulti-Asset Mode is not supported by freqtrade in isolated mode. "
+                            "Please change 'Asset Mode' on your binance futures account."
+                        )
+                
                 if msg:
                     raise OperationalException(msg)
         except ccxt.DDoSProtection as e:
@@ -256,6 +297,140 @@ class Binance(Exchange):
         :return: True if the date falls on a full hour, False otherwise
         """
         return open_date.minute == 0 and open_date.second < 15
+        
+    @retrier
+    def get_balances(self) -> CcxtBalances:
+        """
+        Gets account balances across spot, futures, and portfolio margin modes
+        
+        For Portfolio Margin mode, the parameters need to be adjusted to ensure
+        we get the consolidated balances.
+        
+        :return: A dictionary with the following structure:
+        {
+            'currency': {
+                'free': amount,
+                'used': amount,
+                'total': amount
+            },
+            ...   
+        }
+        """
+        try:
+            params = {}
+            # Portfolio margin mode requires special handling
+            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+                # Using portfolioMargin parameter when getting balances in PM mode
+                # This will ensure we get the consolidated balances across all assets
+                params = {"portfolioMargin": "True"}
+                
+            balances = self._api.fetch_balance(params)
+            # Remove additional info from ccxt results
+            balances.pop("info", None)
+            balances.pop("free", None)
+            balances.pop("total", None)
+            balances.pop("used", None)
+
+            self._log_exchange_response("fetch_balances", balances)
+            return balances
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not get balance due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+            
+    @retrier
+    def fetch_positions(self, pair: str | None = None) -> list[CcxtPosition]:
+        """
+        Fetch positions from the exchange.
+        If no pair is given, all positions are returned.
+        
+        For Portfolio Margin mode, the parameters need to be adjusted to ensure
+        we get the consolidated positions.
+        
+        :param pair: Pair for the query
+        :return: List of position objects
+        """
+        if self._config["dry_run"] or self.trading_mode not in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
+            return []
+        try:
+            symbols = []
+            if pair:
+                symbols.append(pair)
+                
+            params = {}
+            # Portfolio margin mode requires special handling
+            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+                # Using portfolioMargin parameter when getting positions in PM mode
+                # This will ensure we get the consolidated positions
+                params = {"portfolioMargin": "True"}
+                
+            positions: list[CcxtPosition] = self._api.fetch_positions(symbols, params=params)
+            self._log_exchange_response("fetch_positions", positions)
+            return positions
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not get positions due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+            
+    @retrier(retries=0)
+    def _fetch_orders(
+        self, pair: str, since: datetime, params: dict | None = None
+    ) -> list[CcxtOrder]:
+        """
+        Fetch all orders for a pair since a specific time
+        
+        For Portfolio Margin mode, the parameters need to be adjusted to ensure
+        we get the consolidated orders.
+        
+        :param pair: Pair for the query
+        :param since: Starting time for the query
+        :param params: Additional parameters for the request
+        :return: List of order objects
+        """
+        if self._config["dry_run"]:
+            return []
+
+        try:
+            since_ms = int((since.timestamp() - 10) * 1000)
+            
+            if not params:
+                params = {}
+                
+            # Portfolio margin mode requires special handling
+            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+                # Using portfolioMargin parameter when getting orders in PM mode
+                params["portfolioMargin"] = "True"
+
+            if self.exchange_has("fetchOrders"):
+                try:
+                    orders: list[CcxtOrder] = self._api.fetch_orders(
+                        pair, since=since_ms, params=params
+                    )
+                except ccxt.NotSupported:
+                    # Some exchanges don't support fetchOrders
+                    # attempt to fetch open and closed orders separately
+                    orders = self._fetch_orders_emulate(pair, since_ms)
+            else:
+                orders = self._fetch_orders_emulate(pair, since_ms)
+            self._log_exchange_response("fetch_orders", orders)
+            orders = [self._order_contracts_to_amount(o) for o in orders]
+            return orders
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not fetch orders due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
 
     def fetch_funding_rates(self, symbols: list[str] | None = None) -> dict[str, dict[str, float]]:
         """
@@ -264,8 +439,11 @@ class Binance(Exchange):
         :return: Dict of funding rates for the given symbols
         """
         try:
-            if self.trading_mode == TradingMode.FUTURES:
-                rates = self._api.fetch_funding_rates(symbols)
+            if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
+                params = {}
+                if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+                    params = {"portfolioMargin": "True"}
+                rates = self._api.fetch_funding_rates(symbols, params=params)
                 return rates
             return {}
         except ccxt.DDoSProtection as e:
@@ -275,6 +453,123 @@ class Binance(Exchange):
                 f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
             ) from e
 
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+            
+    def _get_params(
+        self,
+        side: BuySell,
+        ordertype: str,
+        leverage: float,
+        reduceOnly: bool,
+        time_in_force: str = "GTC",
+    ) -> dict:
+        """
+        Create parameter dictionary based on order type and portfolio margin mode
+        :param side: BuySell - side of the order
+        :param ordertype: Type of order (market, limit, etc.)
+        :param leverage: Leverage to use
+        :param reduceOnly: If this is a reduce only order
+        :param time_in_force: Time in force (GTC, FOK, IOC)
+        :return: Dictionary with parameters for the order
+        """
+        params = super()._get_params(side, ordertype, leverage, reduceOnly, time_in_force)
+        
+        # Add portfolio margin parameter for PM mode
+        if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+            params["portfolioMargin"] = "True"
+            
+        return params
+        
+    @retrier
+    def cancel_order(self, order_id: str, pair: str, params: dict | None = None) -> dict[str, Any]:
+        """
+        Cancel an order on the exchange.
+        
+        For Portfolio Margin mode, the parameters need to be adjusted to ensure
+        we cancel orders properly in PM mode.
+        
+        :param order_id: Order ID to cancel
+        :param pair: Pair for the order
+        :param params: Additional parameters for the request
+        :return: Order details after cancellation
+        """
+        if self._config["dry_run"]:
+            try:
+                order = self.fetch_dry_run_order(order_id)
+                order.update({"status": "canceled", "filled": 0.0, "remaining": order["amount"]})
+                return order
+            except InvalidOrderException:
+                return {}
+
+        if params is None:
+            params = {}
+            
+        # Portfolio margin mode requires special handling
+        if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+            params["portfolioMargin"] = "True"
+            
+        try:
+            order = self._api.cancel_order(order_id, pair, params=params)
+            self._log_exchange_response("cancel_order", order)
+            order = self._order_contracts_to_amount(order)
+            return order
+        except ccxt.InvalidOrder as e:
+            raise InvalidOrderException(f"Could not cancel order. Message: {e}") from e
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not cancel order due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+            
+    @retrier(retries=API_FETCH_ORDER_RETRY_COUNT)
+    def fetch_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:
+        """
+        Fetch a specific order from the exchange.
+        
+        For Portfolio Margin mode, the parameters need to be adjusted to ensure
+        we get the consolidated order information.
+        
+        :param order_id: Order ID to fetch
+        :param pair: Pair for the order
+        :param params: Additional parameters for the request
+        :return: Order object
+        """
+        if self._config["dry_run"]:
+            return self.fetch_dry_run_order(order_id)
+            
+        if params is None:
+            params = {}
+            
+        # Portfolio margin mode requires special handling
+        if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+            params["portfolioMargin"] = "True"
+            
+        try:
+            if not self.exchange_has("fetchOrder"):
+                return self.fetch_order_emulated(order_id, pair, params)
+                
+            order = self._api.fetch_order(order_id, pair, params=params)
+            self._log_exchange_response("fetch_order", order)
+            order = self._order_contracts_to_amount(order)
+            return order
+        except ccxt.OrderNotFound as e:
+            raise RetryableOrderError(
+                f"Order not found (pair: {pair} id: {order_id}). Message: {e}"
+            ) from e
+        except ccxt.InvalidOrder as e:
+            raise InvalidOrderException(
+                f"Tried to get an invalid order (pair: {pair} id: {order_id}). Message: {e}"
+            ) from e
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not get order due to {e.__class__.__name__}. Message: {e}"
+            ) from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 
@@ -353,17 +648,17 @@ class Binance(Exchange):
                 f"for {self.trading_mode}"
             )
 
-        if self.trading_mode == TradingMode.FUTURES:
+        if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             return (
                 (wallet_balance + cross_vars + maintenance_amt) - (side_1 * amount * open_rate)
             ) / ((amount * mm_ratio) - (side_1 * amount))
         else:
             raise OperationalException(
-                "Freqtrade only supports isolated futures for leverage trading"
+                "Freqtrade only supports futures and portfolio margin for leverage trading"
             )
 
     def load_leverage_tiers(self) -> dict[str, list[dict]]:
-        if self.trading_mode == TradingMode.FUTURES:
+        if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             if self._config["dry_run"]:
                 leverage_tiers_path = Path(__file__).parent / "binance_leverage_tiers.json"
                 with leverage_tiers_path.open() as json_file:
@@ -407,7 +702,7 @@ class Binance(Exchange):
                 since = max(since, listing_date)
 
             _, res = await download_archive_trades(
-                CandleType.FUTURES if self.trading_mode == "futures" else CandleType.SPOT,
+                CandleType.FUTURES if self.trading_mode in ("futures", "portfolio_margin") else CandleType.SPOT,
                 pair,
                 since_ms=since,
                 until_ms=until,
