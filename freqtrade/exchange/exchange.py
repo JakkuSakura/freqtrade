@@ -573,6 +573,7 @@ class Exchange:
                 (self.trading_mode == TradingMode.SPOT and self.market_is_spot(market))
                 or (self.trading_mode == TradingMode.MARGIN and self.market_is_margin(market))
                 or (self.trading_mode == TradingMode.FUTURES and self.market_is_future(market))
+                or self.trading_mode == TradingMode.PORTFOLIO_MARGIN
             )
         )
 
