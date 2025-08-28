@@ -223,10 +223,7 @@ class Wallets:
 
         # Process each currency balance
         for currency, balance_info in balances.items():
-            if not isinstance(balance_info, dict):
-                continue
-
-            total_balance = balance_info.get("total", 0)
+            total_balance = balance_info.total
             if total_balance <= 0:
                 continue
 
@@ -235,38 +232,17 @@ class Wallets:
                 total_equity_usd += total_balance
             else:
                 # Need to convert to USD via ticker price
-                try:
-                    # Try common USD pairs first
-                    for quote in ["USDT", "USD", "USDC"]:
-                        pair = f"{currency}/{quote}"
-                        try:
-                            # Fetch current ticker price - this calls self._api.fetch_ticker() internally
-                            ticker = self._exchange.fetch_ticker(pair)
-                            if ticker and ticker.get('last'):
-                                usd_value = total_balance * ticker['last']
-                                total_equity_usd += usd_value
-                                break
-                        except Exception:
-                            continue
-                    else:
-                        # If no direct USD pair found, try BTC bridge
-                        try:
-                            btc_pair = f"{currency}/BTC"
-                            btc_ticker = self._exchange.fetch_ticker(btc_pair)
-                            btc_usd_ticker = self._exchange.fetch_ticker("BTC/USDT")
-
-                            if (btc_ticker and btc_ticker.get('last') and
-                                    btc_usd_ticker and btc_usd_ticker.get('last')):
-                                btc_value = total_balance * btc_ticker['last']
-                                usd_value = btc_value * btc_usd_ticker['last']
-                                total_equity_usd += usd_value
-                        except Exception:
-                            # Skip currencies we can't price
-                            pass
-
-                except Exception:
-                    # Skip currencies we can't price
-                    pass
+                for quote in ["USDT", "USD", "USDC"]:
+                    pair = f"{currency}/{quote}"
+                    try:
+                        # Fetch current ticker price - this calls self._api.fetch_ticker() internally
+                        ticker = self._exchange.fetch_ticker(pair)
+                        if ticker and ticker.get('last'):
+                            usd_value = total_balance * ticker['last'] / 2
+                            total_equity_usd += usd_value
+                            break
+                    except Exception:
+                        continue
 
         # Add futures positions value (unrealized PnL is already included in collateral)
         positions = self._positions
@@ -277,9 +253,7 @@ class Wallets:
             unrealized_pnl = position.unrealized_pnl
             total_equity_usd += unrealized_pnl  # This is already in USD for most exchanges
 
-
         self._wallets["USD"] = Wallet("USD", total_equity_usd, total_equity_usd, 0)
-
 
     def update(self, require_update: bool = True) -> None:
         """
@@ -291,9 +265,9 @@ class Wallets:
         """
         now = dt_now()
         if (
-            require_update
-            or self._last_wallet_refresh is None
-            or (self._last_wallet_refresh + timedelta(seconds=3600) < now)
+                require_update
+                or self._last_wallet_refresh is None
+                or (self._last_wallet_refresh + timedelta(seconds=3600) < now)
         ):
             if not self._config["dry_run"] or self._config.get("runmode") == RunMode.LIVE:
                 self._update_live()
@@ -389,7 +363,7 @@ class Wallets:
             return min(self.get_total_stake_amount() - Trade.total_open_trades_stakes(), free)
 
     def _calculate_unlimited_stake_amount(
-        self, available_amount: float, val_tied_up: float, max_open_trades: IntOrInf
+            self, available_amount: float, val_tied_up: float, max_open_trades: IntOrInf
     ) -> float:
         """
         Calculate stake amount for "unlimited" stake amount
@@ -427,7 +401,7 @@ class Wallets:
         return max(stake_amount, 0)
 
     def get_trade_stake_amount(
-        self, pair: str, max_open_trades: IntOrInf, update: bool = True
+            self, pair: str, max_open_trades: IntOrInf, update: bool = True
     ) -> float:
         """
         Calculate stake amount for the trade
@@ -450,12 +424,12 @@ class Wallets:
         return self._check_available_stake_amount(stake_amount, available_amount)
 
     def validate_stake_amount(
-        self,
-        pair: str,
-        stake_amount: float | None,
-        min_stake_amount: float | None,
-        max_stake_amount: float,
-        trade_amount: float | None,
+            self,
+            pair: str,
+            stake_amount: float | None,
+            min_stake_amount: float | None,
+            max_stake_amount: float,
+            trade_amount: float | None,
     ):
         if not stake_amount:
             self._local_log(

@@ -1279,35 +1279,29 @@ class Telegram(RPCHandler):
         total_dust_balance = 0
         total_dust_currencies = 0
         for curr in result["currencies"]:
-            curr_output = ""
-            if (curr["is_position"] or curr["est_stake"] > balance_dust_level) and (
-                full_result or curr["is_bot_managed"]
-            ):
-                if curr["is_position"]:
-                    curr_output = (
-                        f"*{curr['currency']}:*\n"
-                        f"\t`{curr['side']}: {curr['position']:.8f}`\n"
-                        f"\t`Est. {curr['stake']}: "
-                        f"{fmt_coin(curr['est_stake'], curr['stake'], False)}`\n"
-                    )
-                else:
-                    est_stake = fmt_coin(
-                        curr["est_stake" if full_result else "est_stake_bot"], curr["stake"], False
-                    )
 
-                    curr_output = (
-                        f"*{curr['currency']}:*\n"
-                        f"\t`Available: {curr['free']:.8f}`\n"
-                        f"\t`Balance: {curr['balance']:.8f}`\n"
-                        f"\t`Pending: {curr['used']:.8f}`\n"
-                        f"\t`Bot Owned: {curr['bot_owned']:.8f}`\n"
-                        f"\t`Est. {curr['stake']}: {est_stake}`\n"
-                    )
-
-            elif curr["est_stake"] <= balance_dust_level:
-                total_dust_balance += curr["est_stake"]
-                total_dust_currencies += 1
-
+            if curr["is_position"]:
+                curr_output = (
+                    f"*{curr['currency']}:*\n"
+                    f"\t`{curr['side']}: {curr['position']:.8f}`\n"
+                    f"\t`Est. {curr['stake']}: "
+                    f"{fmt_coin(curr['est_stake'], curr['stake'], False)}`\n"
+                )
+            else:
+                est_stake = fmt_coin(
+                    curr["est_stake" if full_result else "est_stake_bot"], curr["stake"], False
+                )
+                currency = curr['currency']
+                if currency == 'USD':
+                    continue
+                curr_output = (
+                    f"*{currency}:*\n"
+                    f"\t`Available: {curr['free']:.8f}`\n"
+                    f"\t`Balance: {curr['balance']:.8f}`\n"
+                    f"\t`Pending: {curr['used']:.8f}`\n"
+                    f"\t`Bot Owned: {curr['bot_owned']:.8f}`\n"
+                    f"\t`Est. {curr['stake']}: {est_stake}`\n"
+                )
             # Handle overflowing message length
             if len(output + curr_output) >= MAX_MESSAGE_LENGTH:
                 await self._send_msg(output)

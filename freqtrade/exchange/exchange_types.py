@@ -69,6 +69,7 @@ class Ticker(TypedDict):
     quoteVolume: float | None
     baseVolume: float | None
     percentage: float | None
+    last: float | None
     # Several more - only listing required.
 
 

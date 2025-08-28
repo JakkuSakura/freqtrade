@@ -341,12 +341,15 @@ class Binance(Exchange):
         """
         try:
             params = {}
+            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+                params['type'] = 'pm' # fake type to work around ccxt bug
             balances = self._api.fetch_balance(params)
             # Remove additional info from ccxt results
             balances.pop("info", None)
             balances.pop("free", None)
             balances.pop("total", None)
             balances.pop("used", None)
+            balances.pop("debt", None)
 
             self._log_exchange_response("fetch_balances", balances)
             return balances
