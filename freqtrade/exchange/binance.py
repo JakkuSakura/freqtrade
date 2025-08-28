@@ -448,8 +448,6 @@ class Binance(Exchange):
         try:
             if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
                 params = {}
-                if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
-                    params = {"portfolioMargin": "True"}
                 rates = self._api.fetch_funding_rates(symbols, params=params)
                 return rates
             return {}
@@ -487,7 +485,75 @@ class Binance(Exchange):
             params["portfolioMargin"] = "True"
             
         return params
-        
+    def create_order(
+            self,
+            *,
+            pair: str,
+            ordertype: str,
+            side: BuySell,
+            amount: float,
+            rate: float,
+            leverage: float,
+            reduceOnly: bool = False,
+            time_in_force: str = "GTC",
+    ) -> CcxtOrder:
+        if self._config["dry_run"]:
+            dry_order = self.create_dry_run_order(
+                pair, ordertype, side, amount, self.price_to_precision(pair, rate), leverage
+            )
+            return dry_order
+
+        params = self._get_params(side, ordertype, leverage, reduceOnly, time_in_force)
+
+        try:
+            # Set the precision for amount and price(rate) as accepted by the exchange
+            amount = str(self.amount_to_precision(pair, self._amount_to_contracts(pair, amount)))
+            needs_price = self._order_needs_price(side, ordertype)
+            rate_for_order = self.price_to_precision(pair, rate) if needs_price else None
+
+            if not reduceOnly:
+                self._lev_prep(pair, leverage, side)
+
+            order = self._api.create_order(
+                pair,
+                ordertype,
+                side,
+                amount,
+                rate_for_order,
+                params,
+            )
+            if order.get("status") is None:
+                # Map empty status to open.
+                order["status"] = "open"
+
+            if order.get("type") is None:
+                order["type"] = ordertype
+
+            self._log_exchange_response("create_order", order)
+            order = self._order_contracts_to_amount(order)
+            return order
+
+        except ccxt.InsufficientFunds as e:
+            raise InsufficientFundsError(
+                f"Insufficient funds to create {ordertype} {side} order on market {pair}. "
+                f"Tried to {side} amount {amount} at rate {rate}."
+                f"Message: {e}"
+            ) from e
+        except ccxt.InvalidOrder as e:
+            raise InvalidOrderException(
+                f"Could not create {ordertype} {side} order on market {pair}. "
+                f"Tried to {side} amount {amount} at rate {rate}. "
+                f"Message: {e}"
+            ) from e
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not place {side} order due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+
     @retrier
     def cancel_order(self, order_id: str, pair: str, params: dict | None = None) -> dict[str, Any]:
         """

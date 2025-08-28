@@ -343,3 +343,6 @@ exclude = [
 [tool.codespell]
 ignore-words-list = "coo,fo,strat,zar,selectin"
 skip="*.svg,./user_data,freqtrade/rpc/api_server/ui/installed,freqtrade/exchange/*.json"
+
+[tool.uv.sources]
+ccxt = { path = "../ccxt/python" }
