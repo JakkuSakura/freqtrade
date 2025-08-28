@@ -1,0 +1,3 @@
+[submodule "ccxt"]
+	path = ccxt
+	url = https://github.com/JakkuSakura/ccxt
