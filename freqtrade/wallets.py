@@ -216,7 +216,7 @@ class Wallets:
         Calculate total equity by converting all balances to USD using current market prices.
         Updates _wallets['USD'] with the calculated equity value.
         """
-        total_equity_usd = 99999999
+        total_equity_usd = 0
 
         # Get current balances
         balances = self._wallets
