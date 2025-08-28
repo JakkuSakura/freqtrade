@@ -1097,7 +1097,7 @@ class LocalTrade:
                 # Currency already owned for longs, no need to purchase
                 return float(self._calc_base_close(amount1, rate, self.fee_close) - total_interest)
 
-        elif trading_mode == TradingMode.FUTURES:
+        elif trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             funding_fees = self.funding_fees or 0.0
             # Positive funding_fees -> Trade has gained from fees.
             # Negative funding_fees -> Trade had to pay the fees.

@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Literal, TypedDict
 
 from freqtrade.constants import Config
+from freqtrade.enums import TradingMode
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import Exchange, market_is_active
 from freqtrade.exchange.exchange_types import Ticker, Tickers
@@ -263,7 +264,7 @@ class IPairList(LoggingMixin, ABC):
                 )
                 continue
 
-            if self._exchange.get_pair_quote_currency(pair) != self._config["stake_currency"]:
+            if self._exchange.trading_mode != TradingMode.PORTFOLIO_MARGIN and self._exchange.get_pair_quote_currency(pair) != self._config["stake_currency"]:
                 self.log_once(
                     f"Pair {pair} is not compatible with your stake currency "
                     f"{self._config['stake_currency']}. Removing it from whitelist..",

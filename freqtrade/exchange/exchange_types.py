@@ -101,6 +101,7 @@ class CcxtPosition(TypedDict):
     collateral: float | None
     initialMargin: float | None
     liquidationPrice: float | None
+    unrealizedPnl: float | None
 
 
 CcxtOrder = dict[str, Any]

@@ -122,11 +122,12 @@ class Binance(Exchange):
         Falls back to the stake currency if no proxy coin is found
         :return: Proxy coin or stake currency
         """
-        if self.margin_mode == MarginMode.CROSS:
+        if self.margin_mode in MarginMode.CROSS:
             return self._config.get(
                 "proxy_coin",
                 self._config["stake_currency"],
             )  # type: ignore[return-value]
+
         return self._config["stake_currency"]
 
     def get_tickers(
@@ -152,9 +153,10 @@ class Binance(Exchange):
         Must be overridden in child methods if required.
         """
         try:
+            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
+                return
             # For both futures and portfolio margin, we need to check position mode settings
-            if (self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN) 
-                and not self._config["dry_run"]):
+            if self.trading_mode == TradingMode.FUTURES and not self._config["dry_run"]:
                 position_side = self._api.fapiPrivateGetPositionSideDual()
                 self._log_exchange_response("position_side_setting", position_side)
                 assets_margin = self._api.fapiPrivateGetMultiAssetsMargin()
@@ -339,12 +341,6 @@ class Binance(Exchange):
         """
         try:
             params = {}
-            # Portfolio margin mode requires special handling
-            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
-                # Using portfolioMargin parameter when getting balances in PM mode
-                # This will ensure we get the consolidated balances across all assets
-                params = {"portfolioMargin": "True"}
-                
             balances = self._api.fetch_balance(params)
             # Remove additional info from ccxt results
             balances.pop("info", None)
@@ -383,11 +379,6 @@ class Binance(Exchange):
                 symbols.append(pair)
                 
             params = {}
-            # Portfolio margin mode requires special handling
-            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
-                # Using portfolioMargin parameter when getting positions in PM mode
-                # This will ensure we get the consolidated positions
-                params = {"portfolioMargin": "True"}
                 
             positions: list[CcxtPosition] = self._api.fetch_positions(symbols, params=params)
             self._log_exchange_response("fetch_positions", positions)
@@ -424,11 +415,6 @@ class Binance(Exchange):
             
             if not params:
                 params = {}
-                
-            # Portfolio margin mode requires special handling
-            if self.trading_mode == TradingMode.PORTFOLIO_MARGIN:
-                # Using portfolioMargin parameter when getting orders in PM mode
-                params["portfolioMargin"] = "True"
 
             if self.exchange_has("fetchOrders"):
                 try:

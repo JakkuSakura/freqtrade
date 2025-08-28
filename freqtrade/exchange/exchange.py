@@ -3512,7 +3512,7 @@ class Exchange:
             # Rounding for binance ...
             leverage = floor(leverage)
         try:
-            res = self._api.set_leverage(symbol=pair, leverage=leverage)
+            res = self._api.set_leverage(symbol=pair, leverage=int(leverage))
             self._log_exchange_response("set_leverage", res)
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
@@ -3556,6 +3556,8 @@ class Exchange:
         Set's the margin mode on the exchange to cross or isolated for a specific pair
         :param pair: base/quote currency pair (e.g. "ADA/USDT")
         """
+        if self.margin_mode == margin_mode:
+            return
         if self._config["dry_run"] or not self.exchange_has("setMarginMode"):
             # Some exchanges only support one margin_mode type
             return
@@ -3744,7 +3746,7 @@ class Exchange:
         """
         if self.trading_mode == TradingMode.SPOT:
             return None
-        elif self.trading_mode != TradingMode.FUTURES:
+        elif self.trading_mode not in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             raise OperationalException(
                 f"{self.name} does not support {self.margin_mode} {self.trading_mode}"
             )
