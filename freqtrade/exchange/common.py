@@ -33,7 +33,7 @@ def _get_logging_mixin():
 # Maximum default retry count.
 # Functions are always called RETRY_COUNT + 1 times (for the original call)
 API_RETRY_COUNT = 4
-API_FETCH_ORDER_RETRY_COUNT = 5
+API_FETCH_ORDER_RETRY_COUNT = 1
 
 BAD_EXCHANGES = {
     "bitmex": "Various reasons.",
