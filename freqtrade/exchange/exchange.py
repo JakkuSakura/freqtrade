@@ -901,6 +901,8 @@ class Exchange:
         self._ft_has = deep_merge_dicts(self._ft_has, deepcopy(self._ft_has_default))
         if self.trading_mode == TradingMode.FUTURES:
             self._ft_has = deep_merge_dicts(self._ft_has_futures, self._ft_has)
+        elif self.trading_mode == TradingMode.PORTFOLIO_MARGIN and hasattr(self, '_ft_has_portfolio_margin'):
+            self._ft_has = deep_merge_dicts(self._ft_has_portfolio_margin, self._ft_has)
         if exchange_conf.get("_ft_has_params"):
             self._ft_has = deep_merge_dicts(exchange_conf.get("_ft_has_params"), self._ft_has)
             logger.info("Overriding exchange._ft_has with config params, result: %s", self._ft_has)

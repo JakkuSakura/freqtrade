@@ -64,28 +64,6 @@ class Binance(Exchange):
             "BFUSD": "USDT",
         },
     }
-    
-    _ft_has_portfolio_margin: FtHas = {
-        "funding_fee_candle_limit": 1000,
-        "stoploss_order_types": {"limit": "stop", "market": "stop_market"},
-        "stoploss_blocks_assets": False,  # Stoploss orders do not block assets
-        "order_time_in_force": ["GTC", "FOK", "IOC"],
-        "tickers_have_price": False,
-        "floor_leverage": True,
-        "fetch_orders_limit_minutes": 7 * 1440,  # "fetch_orders" is limited to 7 days
-        "stop_price_type_field": "workingType",
-        "order_props_in_contracts": ["amount", "cost", "filled", "remaining"],
-        "stop_price_type_value_mapping": {
-            PriceType.LAST: "CONTRACT_PRICE",
-            PriceType.MARK: "MARK_PRICE",
-        },
-        "ws_enabled": False,
-        "proxy_coin_mapping": {
-            "BNFCR": "USDC",
-            "BFUSD": "USDT",
-        },
-    }
-    
     _ft_has_portfolio_margin: FtHas = {
         # Portfolio margin uses the same settings as futures
         "funding_fee_candle_limit": 1000,
