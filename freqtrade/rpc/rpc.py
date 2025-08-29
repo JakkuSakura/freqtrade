@@ -1298,6 +1298,52 @@ class RPC:
             "total_stake": sum((trade.open_rate * trade.amount) for trade in trades),
         }
 
+    def _rpc_position(self, stake_currency: str, fiat_display_currency: str) -> dict:
+        """Returns position information for futures trading"""
+        positions: list[dict] = []
+        total_collateral = 0.0
+        total_unrealized_profit = 0.0
+        
+        # Get all positions from wallets
+        for symbol, position in self._freqtrade.wallets.get_all_positions().items():
+            pos_info = {
+                "symbol": symbol,
+                "position": position.position,
+                "collateral": position.collateral,
+                "side": position.side,
+                "leverage": position.leverage,
+                "unrealized_pnl": position.unrealized_pnl,
+                "stake_currency": stake_currency,
+            }
+            
+            # Add position to list
+            positions.append(pos_info)
+            
+            # Add to totals
+            total_collateral += position.collateral
+            total_unrealized_profit += position.unrealized_pnl
+        
+        # Calculate fiat values if available
+        fiat_total_collateral = 0.0
+        fiat_total_unrealized_profit = 0.0
+        if self._fiat_converter:
+            fiat_total_collateral = self._fiat_converter.convert_amount(
+                total_collateral, stake_currency, fiat_display_currency
+            )
+            fiat_total_unrealized_profit = self._fiat_converter.convert_amount(
+                total_unrealized_profit, stake_currency, fiat_display_currency
+            )
+            
+        return {
+            "positions": positions,
+            "total_collateral": total_collateral,
+            "total_unrealized_profit": total_unrealized_profit,
+            "fiat_total_collateral": fiat_total_collateral,
+            "fiat_total_unrealized_profit": fiat_total_unrealized_profit,
+            "stake_currency": stake_currency,
+            "fiat_display_currency": fiat_display_currency,
+        }
+        
     def _rpc_locks(self) -> dict[str, Any]:
         """Returns the  current locks"""
 

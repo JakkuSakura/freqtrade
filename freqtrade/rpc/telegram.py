@@ -168,7 +168,7 @@ class Telegram(RPCHandler):
         section.
         """
         self._keyboard: list[list[str | KeyboardButton]] = [
-            ["/daily", "/profit", "/balance"],
+            ["/daily", "/profit", "/balance", "/position"],
             ["/status", "/status table", "/performance"],
             ["/count", "/start", "/stop", "/help"],
         ]
@@ -197,6 +197,7 @@ class Telegram(RPCHandler):
             r"/count$",
             r"/locks$",
             r"/balance$",
+            r"/position$",
             r"/stopbuy$",
             r"/stopentry$",
             r"/reload_config$",
@@ -307,6 +308,7 @@ class Telegram(RPCHandler):
             CommandHandler("tg_info", self._tg_info),
             CommandHandler("profit_long", self._profit_long),
             CommandHandler("profit_short", self._profit_short),
+            CommandHandler("position", self._position),
         ]
         callbacks = [
             CallbackQueryHandler(self._status_table, pattern="update_status_table"),
@@ -317,6 +319,7 @@ class Telegram(RPCHandler):
             CallbackQueryHandler(self._profit_short, pattern="update_profit_short"),
             CallbackQueryHandler(self._profit, pattern=r"update_profit$"),
             CallbackQueryHandler(self._balance, pattern="update_balance"),
+            CallbackQueryHandler(self._position, pattern="update_position"),
             CallbackQueryHandler(self._performance, pattern="update_performance"),
             CallbackQueryHandler(
                 self._enter_tag_performance, pattern="update_enter_tag_performance"
@@ -1335,6 +1338,82 @@ class Telegram(RPCHandler):
         await self._send_msg(
             output, reload_able=True, callback_path="update_balance", query=update.callback_query
         )
+        
+    @authorized_only
+    async def _position(self, update: Update, context: CallbackContext) -> None:
+        """Handler for /position - shows information about open positions"""
+        stake_currency = self._config["stake_currency"]
+        fiat_display_currency = self._config.get("fiat_display_currency", "")
+        
+        output = ""
+        if self._config["dry_run"]:
+            output += "*Warning:* Simulated positions in Dry Mode.\n"
+            
+        # Check if we're in futures mode
+        if self._config.get("trading_mode", "spot") not in ("futures", "portfolio_margin"):
+            output += "*No positions available - not in futures mode.*\n"
+            await self._send_msg(
+                output, reload_able=True, callback_path="update_position", query=update.callback_query
+            )
+            return
+        
+        # Get position information from RPC
+        result = self._rpc._rpc_position(stake_currency, fiat_display_currency)
+        positions = result["positions"]
+        
+        if not positions:
+            output += "*No open positions found.*\n"
+            await self._send_msg(
+                output, reload_able=True, callback_path="update_position", query=update.callback_query
+            )
+            return
+            
+        for position in positions:
+            # Get detailed position information
+            leverage_text = f" ({position['leverage']}x)" if position.get('leverage') else ""
+            unrealized_pnl = position.get('unrealized_pnl', 0.0)
+            unrealized_pnl_text = f"+{unrealized_pnl:.8f}" if unrealized_pnl >= 0 else f"{unrealized_pnl:.8f}"
+            
+            curr_output = (
+                f"*{position['symbol']}:*\n"
+                f"\t`Side: {position['side']}{leverage_text}`\n"
+                f"\t`Position Size: {position['position']:.8f}`\n"
+                f"\t`Collateral: {fmt_coin(position['collateral'], stake_currency)}`\n"
+                f"\t`Unrealized PnL: {unrealized_pnl_text} {stake_currency}`\n"
+            )
+            
+            # Handle overflowing message length
+            if len(output + curr_output) >= MAX_MESSAGE_LENGTH:
+                await self._send_msg(output)
+                output = curr_output
+            else:
+                output += curr_output
+        
+        # Add summary information
+        total_collateral = fmt_coin(result["total_collateral"], stake_currency)
+        total_unrealized_profit = result["total_unrealized_profit"]
+        profit_prefix = "+" if total_unrealized_profit >= 0 else ""
+        
+        output += (
+            f"\n*Position Summary:*\n"
+            f"\t`Total Collateral: {total_collateral}`\n"
+            f"\t`Total Unrealized PnL: {profit_prefix}{total_unrealized_profit:.8f} {stake_currency}`\n"
+        )
+        
+        # Add fiat values if available
+        if fiat_display_currency and result.get("fiat_total_collateral"):
+            fiat_collateral = result["fiat_total_collateral"]
+            fiat_profit = result["fiat_total_unrealized_profit"]
+            fiat_profit_prefix = "+" if fiat_profit >= 0 else ""
+            
+            output += (
+                f"\t`{fiat_display_currency} Value: {fiat_collateral:.2f}`\n"
+                f"\t`{fiat_display_currency} Unrealized PnL: {fiat_profit_prefix}{fiat_profit:.2f}`\n"
+            )
+        
+        await self._send_msg(
+            output, reload_able=True, callback_path="update_position", query=update.callback_query
+        )
 
     @authorized_only
     async def _start(self, update: Update, context: CallbackContext) -> None:
@@ -1941,6 +2020,7 @@ class Telegram(RPCHandler):
             "*/show_config:* `Show running configuration` \n"
             "*/locks:* `Show currently locked pairs`\n"
             "*/balance:* `Show bot managed balance per currency`\n"
+            "*/position:* `Show current position information`\n"
             "*/balance total:* `Show account balance per currency`\n"
             "*/logs [limit]:* `Show latest logs - defaults to 10` \n"
             "*/count:* `Show number of active trades compared to allowed number of trades`\n"
