@@ -284,7 +284,7 @@ class Wallets:
         return self._positions
 
     def _check_exit_amount(self, trade: Trade) -> bool:
-        if trade.trading_mode != TradingMode.FUTURES:
+        if trade.trading_mode not in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             # Slightly higher offset than in safe_exit_amount.
             wallet_amount: float = self.get_total(trade.safe_base_currency) * (2 - 0.981)
         else:

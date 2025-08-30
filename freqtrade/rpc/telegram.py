@@ -99,7 +99,7 @@ def authorized_only(command_handler: Callable[..., Coroutine[Any, Any, None]]):
     @wraps(command_handler)
     async def wrapper(self, *args, **kwargs) -> None:
         """Decorator logic"""
-        # update = kwargs.get("update") or args[0]
+        update = kwargs.get("update") or args[0]
         #
         # # Reject unauthorized messages
         message: Message = (

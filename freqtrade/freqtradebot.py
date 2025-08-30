@@ -2012,7 +2012,7 @@ class FreqtradeBot(LoggingMixin):
         """
         # Update wallets to ensure amounts tied up in a stoploss is now free!
         self.wallets.update()
-        if self.trading_mode == TradingMode.FUTURES:
+        if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
             # A safe exit amount isn't needed for futures, you can just exit/close the position
             return amount
 
