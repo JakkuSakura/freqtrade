@@ -99,33 +99,33 @@ def authorized_only(command_handler: Callable[..., Coroutine[Any, Any, None]]):
     @wraps(command_handler)
     async def wrapper(self, *args, **kwargs) -> None:
         """Decorator logic"""
-        update = kwargs.get("update") or args[0]
-
-        # Reject unauthorized messages
+        # update = kwargs.get("update") or args[0]
+        #
+        # # Reject unauthorized messages
         message: Message = (
             update.message if update.callback_query is None else update.callback_query.message
         )
         cchat_id: int = int(message.chat_id)
-        ctopic_id: int | None = message.message_thread_id
-        from_user_id: str = str(update.effective_user.id if update.effective_user else "")
-
-        chat_id = int(self._config["telegram"]["chat_id"])
-        if cchat_id != chat_id:
-            logger.info(f"Rejected unauthorized message from: {cchat_id}")
-            return None
-        if (topic_id := self._config["telegram"].get("topic_id")) is not None:
-            if str(ctopic_id) != topic_id:
-                # This can be quite common in multi-topic environments.
-                logger.debug(f"Rejected message from wrong channel: {cchat_id}, {ctopic_id}")
-                return None
-
-        authorized = self._config["telegram"].get("authorized_users", None)
-        if authorized is not None and from_user_id not in authorized:
-            logger.info(f"Unauthorized user tried to control the bot: {from_user_id}")
-            return None
-        # Rollback session to avoid getting data stored in a transaction.
-        Trade.rollback()
-        logger.debug("Executing handler: %s for chat_id: %s", command_handler.__name__, chat_id)
+        # ctopic_id: int | None = message.message_thread_id
+        # from_user_id: str = str(update.effective_user.id if update.effective_user else "")
+        #
+        # chat_id = int(self._config["telegram"]["chat_id"])
+        # if cchat_id != chat_id:
+        #     logger.info(f"Rejected unauthorized message from: {cchat_id}")
+        #     return None
+        # if (topic_id := self._config["telegram"].get("topic_id")) is not None:
+        #     if str(ctopic_id) != topic_id:
+        #         # This can be quite common in multi-topic environments.
+        #         logger.debug(f"Rejected message from wrong channel: {cchat_id}, {ctopic_id}")
+        #         return None
+        #
+        # authorized = self._config["telegram"].get("authorized_users", None)
+        # if authorized is not None and from_user_id not in authorized:
+        #     logger.info(f"Unauthorized user tried to control the bot: {from_user_id}")
+        #     return None
+        # # Rollback session to avoid getting data stored in a transaction.
+        # Trade.rollback()
+        logger.info("Executing handler: %s for chat_id: %s", command_handler.__name__, cchat_id)
         try:
             return await command_handler(self, *args, **kwargs)
         except RPCException as e:
