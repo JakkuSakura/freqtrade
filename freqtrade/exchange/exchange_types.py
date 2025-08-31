@@ -103,6 +103,8 @@ class CcxtPosition(TypedDict):
     initialMargin: float | None
     liquidationPrice: float | None
     unrealizedPnl: float | None
+    entryPrice: float | None
+    notional: float | None
 
 
 CcxtOrder = dict[str, Any]

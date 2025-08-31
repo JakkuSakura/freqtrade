@@ -11,7 +11,7 @@ from pandas import DataFrame
 from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS, BuySell
 from freqtrade.enums import CandleType, MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError, InvalidOrderException, \
-    RetryableOrderError
+    RetryableOrderError, InsufficientFundsError
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.binance_public_data import (
     concat_safe,
@@ -621,6 +621,7 @@ class Binance(Exchange):
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            # Handle as a normal temporary error
             raise TemporaryError(
                 f"Could not get order due to {e.__class__.__name__}. Message: {e}"
             ) from e

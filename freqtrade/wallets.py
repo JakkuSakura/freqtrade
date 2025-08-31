@@ -32,6 +32,8 @@ class PositionWallet(NamedTuple):
     collateral: float = 0
     side: str = "long"
     unrealized_pnl: float = 0.0
+    open_rate: float | None = None
+    notional_value: float | None = None  # Current value of the position
 
 
 class Wallets:
@@ -194,7 +196,7 @@ class Wallets:
         _parsed_positions = {}
         for position in positions:
             symbol = position["symbol"]
-            if position["side"] is None or position["collateral"] == 0.0:
+            if position["side"] is None or position['contracts'] == 0:
                 # Position is not open ...
                 continue
             size = self._exchange._contracts_to_amount(symbol, position["contracts"])
@@ -206,7 +208,9 @@ class Wallets:
                 leverage=leverage,
                 collateral=collateral,
                 side=position["side"],
-                unrealized_pnl=position['unrealizedPnl']
+                unrealized_pnl=position['unrealizedPnl'],
+                open_rate=position['entryPrice'],
+                notional_value=position['notional']
             )
         self._positions = _parsed_positions
         self._wallets = _wallets

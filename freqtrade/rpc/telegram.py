@@ -125,7 +125,7 @@ def authorized_only(command_handler: Callable[..., Coroutine[Any, Any, None]]):
         #     return None
         # # Rollback session to avoid getting data stored in a transaction.
         # Trade.rollback()
-        logger.info("Executing handler: %s for chat_id: %s", command_handler.__name__, cchat_id)
+        logger.debug("Executing handler: %s for chat_id: %s", command_handler.__name__, cchat_id)
         try:
             return await command_handler(self, *args, **kwargs)
         except RPCException as e:
@@ -171,6 +171,7 @@ class Telegram(RPCHandler):
             ["/daily", "/profit", "/balance", "/position"],
             ["/status", "/status table", "/performance"],
             ["/count", "/start", "/stop", "/help"],
+            ["/forceexit"],
         ]
         # do not allow commands with mandatory arguments and critical cmds
         # TODO: DRY! - its not good to list all valid cmds here. But otherwise
@@ -198,6 +199,7 @@ class Telegram(RPCHandler):
             r"/locks$",
             r"/balance$",
             r"/position$",
+            r"/orders$",
             r"/stopbuy$",
             r"/stopentry$",
             r"/reload_config$",
@@ -309,6 +311,7 @@ class Telegram(RPCHandler):
             CommandHandler("profit_long", self._profit_long),
             CommandHandler("profit_short", self._profit_short),
             CommandHandler("position", self._position),
+            CommandHandler("orders", self._open_orders),
         ]
         callbacks = [
             CallbackQueryHandler(self._status_table, pattern="update_status_table"),
@@ -320,6 +323,7 @@ class Telegram(RPCHandler):
             CallbackQueryHandler(self._profit, pattern=r"update_profit$"),
             CallbackQueryHandler(self._balance, pattern="update_balance"),
             CallbackQueryHandler(self._position, pattern="update_position"),
+            CallbackQueryHandler(self._open_orders, pattern="update_open_orders"),
             CallbackQueryHandler(self._performance, pattern="update_performance"),
             CallbackQueryHandler(
                 self._enter_tag_performance, pattern="update_enter_tag_performance"
@@ -486,7 +490,7 @@ class Telegram(RPCHandler):
             if is_final_exit:
                 profit_prefix = "Sub "
                 cp_extra = (
-                    f"*Final Profit:* `{msg['final_profit_ratio']:.2%} "
+                    f"*Final Profit:* `{msg['final_profit_ratio']} "
                     f"({msg['cumulative_profit']:.8f} {msg['quote_currency']}{cp_fiat})`\n"
                 )
             else:
@@ -1282,29 +1286,20 @@ class Telegram(RPCHandler):
         total_dust_balance = 0
         total_dust_currencies = 0
         for curr in result["currencies"]:
-
-            if curr["is_position"]:
-                curr_output = (
-                    f"*{curr['currency']}:*\n"
-                    f"\t`{curr['side']}: {curr['position']:.8f}`\n"
-                    f"\t`Est. {curr['stake']}: "
-                    f"{fmt_coin(curr['est_stake'], curr['stake'], False)}`\n"
-                )
-            else:
-                est_stake = fmt_coin(
-                    curr["est_stake" if full_result else "est_stake_bot"], curr["stake"], False
-                )
-                currency = curr['currency']
-                if currency == 'USD':
-                    continue
-                curr_output = (
-                    f"*{currency}:*\n"
-                    f"\t`Available: {curr['free']:.8f}`\n"
-                    f"\t`Balance: {curr['balance']:.8f}`\n"
-                    f"\t`Pending: {curr['used']:.8f}`\n"
-                    f"\t`Bot Owned: {curr['bot_owned']:.8f}`\n"
-                    f"\t`Est. {curr['stake']}: {est_stake}`\n"
-                )
+            est_stake = fmt_coin(
+                curr["est_stake" if full_result else "est_stake_bot"], curr["stake"], False
+            )
+            currency = curr['currency']
+            if currency == 'USD':
+                continue
+            curr_output = (
+                f"*{currency}:*\n"
+                f"\t`Available: {curr['free']:.8f}`\n"
+                f"\t`Balance: {curr['balance']:.8f}`\n"
+                f"\t`Pending: {curr['used']:.8f}`\n"
+                f"\t`Bot Owned: {curr['bot_owned']:.8f}`\n"
+                f"\t`Est. {curr['stake']}: {est_stake}`\n"
+            )
             # Handle overflowing message length
             if len(output + curr_output) >= MAX_MESSAGE_LENGTH:
                 await self._send_msg(output)
@@ -1413,6 +1408,72 @@ class Telegram(RPCHandler):
         
         await self._send_msg(
             output, reload_able=True, callback_path="update_position", query=update.callback_query
+        )
+        
+    @authorized_only
+    async def _open_orders(self, update: Update, context: CallbackContext) -> None:
+        """Handler for /orders - shows information about open orders"""
+        stake_currency = self._config["stake_currency"]
+        
+        output = ""
+        if self._config["dry_run"]:
+            output += "*Warning:* Simulated open orders in Dry Mode.\n"
+            
+        # Get open orders from RPC
+        result = self._rpc._rpc_open_orders()
+        orders = result.get("orders", [])
+        
+        if not orders:
+            output += "*No open orders found.*\n"
+            await self._send_msg(
+                output, reload_able=True, callback_path="update_open_orders", query=update.callback_query
+            )
+            return
+            
+        for order in orders:
+            # Format order details
+            symbol = order.get('symbol', '')
+            order_id = order.get('id', '')
+            order_type = order.get('type', '').upper()
+            side = order.get('side', '').upper()
+            price = order.get('price', 0.0)
+            amount = order.get('amount', 0.0)
+            filled = order.get('filled', 0.0)
+            remaining = order.get('remaining', 0.0)
+            status = order.get('status', '').upper()
+            date = order.get('datetime', '')
+            trade_id = order.get('ft_trade_id', None)
+            order_tag = order.get('ft_order_tag', None)
+            
+            curr_output = (
+                f"*{symbol}* - ID: `{order_id}`\n"
+                f"\t`Trade ID: {trade_id if trade_id else 'N/A'}`\n"
+                f"\t`Type: {order_type} {side}`\n"
+                f"\t`Price: {fmt_coin2(price, stake_currency)}`\n"
+                f"\t`Amount: {round_value(amount, 8)}`\n"
+                f"\t`Filled: {round_value(filled, 8)}`\n"
+                f"\t`Remaining: {round_value(remaining, 8)}`\n"
+                f"\t`Status: {status}`\n"
+                f"\t`Date: {date}`\n"
+            )
+            
+            if order_tag:
+                curr_output += f"\t`Tag: {order_tag}`\n"
+            
+            # Handle overflowing message length
+            if len(output + curr_output) >= MAX_MESSAGE_LENGTH:
+                await self._send_msg(output)
+                output = curr_output
+            else:
+                output += curr_output
+        
+        # Add summary information
+        total_orders = len(orders)
+        output += f"\n*Order Summary:*\n"
+        output += f"\t`Total Open Orders: {total_orders}`\n"
+        
+        await self._send_msg(
+            output, reload_able=True, callback_path="update_open_orders", query=update.callback_query
         )
 
     @authorized_only

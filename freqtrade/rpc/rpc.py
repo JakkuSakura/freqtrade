@@ -51,7 +51,6 @@ from freqtrade.util import (
 )
 from freqtrade.wallets import PositionWallet, Wallet
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -124,7 +123,7 @@ class RPC:
 
     @staticmethod
     def _rpc_show_config(
-        config, botstate: State | str, strategy_version: str | None = None
+            config, botstate: State | str, strategy_version: str | None = None
     ) -> dict[str, Any]:
         """
         Return a dict of config options.
@@ -287,7 +286,7 @@ class RPC:
             return results
 
     def _rpc_status_table(
-        self, stake_currency: str, fiat_display_currency: str
+            self, stake_currency: str, fiat_display_currency: str
     ) -> tuple[list, list, float, float]:
         """
         :return: list of trades, list of columns, sum of fiat profit
@@ -366,11 +365,11 @@ class RPC:
         return trades_list, columns, fiat_profit_sum, fiat_total_profit_sum
 
     def _rpc_timeunit_profit(
-        self,
-        timescale: int,
-        stake_currency: str,
-        fiat_display_currency: str,
-        timeunit: str = "days",
+            self,
+            timescale: int,
+            stake_currency: str,
+            fiat_display_currency: str,
+            timeunit: str = "days",
     ) -> dict[str, Any]:
         """
         :param timeunit: Valid entries are 'days', 'weeks', 'months'
@@ -503,10 +502,10 @@ class RPC:
         return {"exit_reasons": exit_reasons, "durations": durations}
 
     def _collect_trade_statistics_data(
-        self,
-        trades: Sequence["Trade"],
-        stake_currency: str,
-        fiat_display_currency: str,
+            self,
+            trades: Sequence["Trade"],
+            stake_currency: str,
+            fiat_display_currency: str,
     ) -> dict[str, Any]:
         """Iterate trades, calculate various statistics, and return intermediate results."""
         profit_all_coin = []
@@ -570,11 +569,11 @@ class RPC:
         }
 
     def _rpc_trade_statistics(
-        self,
-        stake_currency: str,
-        fiat_display_currency: str,
-        start_date: datetime | None = None,
-        direction: str | None = None,
+            self,
+            stake_currency: str,
+            fiat_display_currency: str,
+            start_date: datetime | None = None,
+            direction: str | None = None,
     ) -> dict[str, Any]:
         """
         Returns cumulative profit statistics, with optional direction filter (long/short)
@@ -582,8 +581,8 @@ class RPC:
         start_date = datetime.fromtimestamp(0) if start_date is None else start_date
 
         trade_filter = (
-            Trade.is_open.is_(False) & (Trade.close_date >= start_date)
-        ) | Trade.is_open.is_(True)
+                               Trade.is_open.is_(False) & (Trade.close_date >= start_date)
+                       ) | Trade.is_open.is_(True)
 
         if direction == "long":
             dir_filter = Trade.is_short.is_(False)
@@ -742,7 +741,7 @@ class RPC:
         }
 
     def __balance_get_est_stake(
-        self, coin: str, stake_currency: str, amount: float, balance: Wallet
+            self, coin: str, stake_currency: str, amount: float, balance: Wallet
     ) -> tuple[float, float]:
         est_stake = 0.0
         est_bot_stake = 0.0
@@ -793,7 +792,7 @@ class RPC:
 
             trade = (
                 open_assets.get(coin, None)
-                if self._freqtrade.trading_mode != TradingMode.FUTURES
+                if self._freqtrade.trading_mode not in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN)
                 else None
             )
             is_stake_currency = coin == self._freqtrade.exchange.get_proxy_coin()
@@ -829,28 +828,6 @@ class RPC:
                     "is_position": False,
                 }
             )
-        symbol: str
-        position: PositionWallet
-        for symbol, position in self._freqtrade.wallets.get_all_positions().items():
-            total += position.collateral
-            total_bot += position.collateral
-
-            currencies.append(
-                {
-                    "currency": symbol,
-                    "free": 0,
-                    "balance": 0,
-                    "used": 0,
-                    "position": position.position,
-                    "est_stake": position.collateral,
-                    "est_stake_bot": position.collateral,
-                    "stake": stake_currency,
-                    "side": position.side,
-                    "is_bot_managed": True,
-                    "is_position": True,
-                }
-            )
-
         value = (
             self._fiat_converter.convert_amount(total, stake_currency, fiat_display_currency)
             if self._fiat_converter
@@ -938,7 +915,7 @@ class RPC:
         return {"status": "Reloaded from orders from exchange"}
 
     def __exec_force_exit(
-        self, trade: Trade, ordertype: str | None, amount: float | None = None
+            self, trade: Trade, ordertype: str | None, amount: float | None = None
     ) -> bool:
         # Check if there is there are open orders
         trade_entry_cancelation_registry = []
@@ -988,7 +965,7 @@ class RPC:
         return False
 
     def _rpc_force_exit(
-        self, trade_id: str, ordertype: str | None = None, *, amount: float | None = None
+            self, trade_id: str, ordertype: str | None = None, *, amount: float | None = None
     ) -> dict[str, str]:
         """
         Handler for forceexit <id>.
@@ -1045,15 +1022,15 @@ class RPC:
             )
 
     def _rpc_force_entry(
-        self,
-        pair: str,
-        price: float | None,
-        *,
-        order_type: str | None = None,
-        order_side: SignalDirection = SignalDirection.LONG,
-        stake_amount: float | None = None,
-        enter_tag: str | None = "force_entry",
-        leverage: float | None = None,
+            self,
+            pair: str,
+            price: float | None,
+            *,
+            order_type: str | None = None,
+            order_side: SignalDirection = SignalDirection.LONG,
+            stake_amount: float | None = None,
+            enter_tag: str | None = "force_entry",
+            leverage: float | None = None,
     ) -> Trade | None:
         """
         Handler for forcebuy <asset> <price>
@@ -1094,15 +1071,15 @@ class RPC:
             )
         with self._freqtrade._exit_lock:
             if self._freqtrade.execute_entry(
-                pair,
-                stake_amount,
-                price,
-                ordertype=order_type,
-                trade=trade,
-                is_short=is_short,
-                enter_tag=enter_tag,
-                leverage_=leverage,
-                mode="pos_adjust" if trade else "initial",
+                    pair,
+                    stake_amount,
+                    price,
+                    ordertype=order_type,
+                    trade=trade,
+                    is_short=is_short,
+                    enter_tag=enter_tag,
+                    leverage_=leverage,
+                    mode="pos_adjust" if trade else "initial",
             ):
                 Trade.commit()
                 trade = Trade.get_trades([Trade.is_open.is_(True), Trade.pair == pair]).first()
@@ -1161,8 +1138,8 @@ class RPC:
 
             # cancel stoploss on exchange orders ...
             if (
-                self._freqtrade.strategy.order_types.get("stoploss_on_exchange")
-                and trade.has_open_sl_orders
+                    self._freqtrade.strategy.order_types.get("stoploss_on_exchange")
+                    and trade.has_open_sl_orders
             ):
                 for oslo in trade.open_sl_orders:
                     try:
@@ -1185,7 +1162,7 @@ class RPC:
 
     @custom_data_rpc_wrapper
     def _rpc_list_custom_data(
-        self, trade_id: int | None = None, key: str | None = None, limit: int = 100, offset: int = 0
+            self, trade_id: int | None = None, key: str | None = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
         """
         Fetch custom data for a specific trade, or all open trades if `trade_id` is not provided.
@@ -1299,12 +1276,17 @@ class RPC:
         }
 
     def _rpc_position(self, stake_currency: str, fiat_display_currency: str) -> dict:
-        """Returns position information for futures trading"""
+        """Returns position information for futures trading
+        
+        This method reads directly from the exchange's position cache rather than 
+        using the local trade database, ensuring it shows the actual positions 
+        on the exchange even if they're not properly tracked in the database.
+        """
         positions: list[dict] = []
         total_collateral = 0.0
         total_unrealized_profit = 0.0
-        
-        # Get all positions from wallets
+
+        # Get all positions from wallets (now with refreshed data)
         for symbol, position in self._freqtrade.wallets.get_all_positions().items():
             pos_info = {
                 "symbol": symbol,
@@ -1315,14 +1297,14 @@ class RPC:
                 "unrealized_pnl": position.unrealized_pnl,
                 "stake_currency": stake_currency,
             }
-            
+
             # Add position to list
             positions.append(pos_info)
-            
+
             # Add to totals
             total_collateral += position.collateral
             total_unrealized_profit += position.unrealized_pnl
-        
+
         # Calculate fiat values if available
         fiat_total_collateral = 0.0
         fiat_total_unrealized_profit = 0.0
@@ -1333,17 +1315,48 @@ class RPC:
             fiat_total_unrealized_profit = self._fiat_converter.convert_amount(
                 total_unrealized_profit, stake_currency, fiat_display_currency
             )
-            
         return {
-            "positions": positions,
-            "total_collateral": total_collateral,
-            "total_unrealized_profit": total_unrealized_profit,
-            "fiat_total_collateral": fiat_total_collateral,
-            "fiat_total_unrealized_profit": fiat_total_unrealized_profit,
-            "stake_currency": stake_currency,
-            "fiat_display_currency": fiat_display_currency,
+            'positions': positions,
+            'total_collateral': total_collateral,
+            'total_unrealized_profit': total_unrealized_profit,
+            'fiat_total_collateral': fiat_total_collateral,
+            'fiat_total_unrealized_profit': fiat_total_unrealized_profit,
+            'fiat_display_currency': fiat_display_currency,
         }
+
+    def _rpc_open_orders(self) -> dict:
+        """Returns open orders from the exchange
         
+        This method retrieves all open orders directly from the exchange
+        using the fetch_open_orders method.
+        """
+        orders: list[dict] = []
+
+        if self._freqtrade.state == State.STOPPED:
+            raise RPCException("trader is not running")
+
+        # Get all open orders from the exchange
+        open_orders = self._freqtrade.exchange.fetch_orders([])
+
+        # Enrich order data with trade information
+        for order in open_orders:
+            # Find associated trade if possible
+            trade_id = None
+            order_obj = Order.order_by_id(str(order['id']))
+            if order_obj:
+                trade_id = order_obj.ft_trade_id
+                # Add order tag if available
+                order['ft_order_tag'] = order_obj.ft_order_tag
+
+            # Add trade ID to order data
+            order['ft_trade_id'] = trade_id
+            orders.append(order)
+
+        return {
+            "orders": orders,
+            "order_count": len(orders),
+        }
+
     def _rpc_locks(self) -> dict[str, Any]:
         """Returns the  current locks"""
 
@@ -1351,7 +1364,7 @@ class RPC:
         return {"lock_count": len(locks), "locks": [lock.to_json() for lock in locks]}
 
     def _rpc_delete_lock(
-        self, lockid: int | None = None, pair: str | None = None
+            self, lockid: int | None = None, pair: str | None = None
     ) -> dict[str, Any]:
         """Delete specific lock(s)"""
         locks: Sequence[PairLock] = []
@@ -1451,13 +1464,13 @@ class RPC:
 
     @staticmethod
     def _convert_dataframe_to_dict(
-        strategy: str,
-        pair: str,
-        timeframe: str,
-        dataframe: DataFrame,
-        last_analyzed: datetime,
-        selected_cols: list[str] | None,
-        annotations: list[AnnotationType],
+            strategy: str,
+            pair: str,
+            timeframe: str,
+            dataframe: DataFrame,
+            last_analyzed: datetime,
+            selected_cols: list[str] | None,
+            annotations: list[AnnotationType],
     ) -> dict[str, Any]:
         has_content = len(dataframe) != 0
         dataframe_columns = list(dataframe.columns)
@@ -1527,7 +1540,7 @@ class RPC:
         return res
 
     def _rpc_analysed_dataframe(
-        self, pair: str, timeframe: str, limit: int | None, selected_cols: list[str] | None
+            self, pair: str, timeframe: str, limit: int | None, selected_cols: list[str] | None
     ) -> dict[str, Any]:
         """Analyzed dataframe in Dict form"""
 
@@ -1545,7 +1558,7 @@ class RPC:
         )
 
     def __rpc_analysed_dataframe_raw(
-        self, pair: str, timeframe: str, limit: int | None
+            self, pair: str, timeframe: str, limit: int | None
     ) -> tuple[DataFrame, datetime]:
         """
         Get the dataframe and last analyze from the dataprovider
@@ -1563,7 +1576,7 @@ class RPC:
         return _data, last_analyzed
 
     def _ws_all_analysed_dataframes(
-        self, pairlist: list[str], limit: int | None
+            self, pairlist: list[str], limit: int | None
     ) -> Generator[dict[str, Any], None, None]:
         """
         Get the analysed dataframes of each pair in the pairlist.
@@ -1595,12 +1608,12 @@ class RPC:
 
     @staticmethod
     def _rpc_analysed_history_full(
-        config: Config,
-        pair: str,
-        timeframe: str,
-        exchange: Exchange,
-        selected_cols: list[str] | None,
-        live: bool,
+            config: Config,
+            pair: str,
+            timeframe: str,
+            exchange: Exchange,
+            selected_cols: list[str] | None,
+            live: bool,
     ) -> dict[str, Any]:
         timerange_parsed = TimeRange.parse_timerange(config.get("timerange"))
 
@@ -1668,8 +1681,8 @@ class RPC:
 
     def _rpc_plot_config(self) -> dict[str, Any]:
         if (
-            self._freqtrade.strategy.plot_config
-            and "subplots" not in self._freqtrade.strategy.plot_config
+                self._freqtrade.strategy.plot_config
+                and "subplots" not in self._freqtrade.strategy.plot_config
         ):
             self._freqtrade.strategy.plot_config["subplots"] = {}
         return self._freqtrade.strategy.plot_config
