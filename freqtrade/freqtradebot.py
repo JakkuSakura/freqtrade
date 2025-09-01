@@ -156,6 +156,7 @@ class FreqtradeBot(LoggingMixin):
 
         self._schedule = Scheduler()
 
+        self._schedule.every().minute.do(self.refresh_positions_orders_trades)
         if self.trading_mode == TradingMode.FUTURES:
 
             def update():
@@ -241,10 +242,19 @@ class FreqtradeBot(LoggingMixin):
         # Only update open orders on startup
         # This will update the database after the initial migration
         self.startup_update_open_orders()
-        # Verify that our trades match actual exchange positions
-        self.verify_trades_against_positions()
-        self.update_all_liquidation_prices()
-        self.update_funding_fees()
+
+        if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
+            # Perform a full refresh of positions, orders, and trades at startup
+            logger.info("Performing full refresh of positions, orders, and trades at startup...")
+            # First verify trades against positions
+            self.verify_trades_against_positions()
+            # Then update liquidation prices and funding fees
+            self.update_all_liquidation_prices()
+            self.update_funding_fees()
+        else:
+            # For non-futures modes, just update liquidation prices and funding fees
+            self.update_all_liquidation_prices()
+            self.update_funding_fees()
 
     def process(self) -> None:
         """
@@ -379,6 +389,58 @@ class FreqtradeBot(LoggingMixin):
                     )
                 )
 
+    def refresh_positions_orders_trades(self) -> None:
+        """
+        Refresh positions, orders and trades data from the exchange.
+        - Updates wallet balances
+        - Refreshes open orders
+        - Synchronizes trades with positions
+        """
+        if self.config["dry_run"] or not (self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN)):
+            # Only applicable for futures/portfolio margin live trading
+            return
+
+        try:
+            start_time = datetime.now(UTC)
+            logger.info("Performing periodic refresh of positions, orders, and trades...")
+
+            # Update wallets
+            self.wallets.update()
+
+            # Refresh open orders
+            open_orders = Order.get_open_orders()
+            updated_orders = 0
+            for order in open_orders:
+                # Skip orders without trades
+                if not order.trade:
+                    continue
+                try:
+                    # Update each order's status
+                    self.update_trade_state(order.trade, order.order_id, send_msg=False)
+                    updated_orders += 1
+                except Exception as e:
+                    logger.warning(f"Error updating order {order.order_id}: {e}")
+
+            # Finally synchronize trades with exchange positions
+            self.verify_trades_against_positions()
+
+            # Calculate execution time
+            end_time = datetime.now(UTC)
+            execution_time = (end_time - start_time).total_seconds()
+
+            # Send a status message to RPC
+            self.rpc.send_msg({
+                "type": RPCMessageType.STATUS,
+                "status": (f"Periodic refresh completed in {execution_time:.2f}s. "
+                           f"Updated {updated_orders} orders and synchronized positions with trades.")
+            })
+
+            logger.info(f"Periodic refresh completed in {execution_time:.2f}s. Updated {updated_orders} orders.")
+        except Exception as e:
+            logger.warning(f"Error during periodic refresh: {e}")
+            logger.exception(e)
+            # Don't raise exceptions from scheduled tasks
+
     def verify_trades_against_positions(self) -> None:
         """
         Perform a comprehensive synchronization between local trades and exchange positions:
@@ -395,6 +457,9 @@ class FreqtradeBot(LoggingMixin):
         logger.info("Synchronizing local trades with exchange positions...")
 
         try:
+            # First refresh positions to ensure we have the latest data
+            self.wallets.update()
+
             # Fetch all open positions from the exchange
             position_map = self.wallets.get_all_positions()
 
@@ -404,14 +469,19 @@ class FreqtradeBot(LoggingMixin):
 
             # 1. Handle trades with no matching position - delete them
             for trade in trades:
-                symbol = trade.pair + ':USDT'
+                # Convert Freqtrade pair to exchange symbol
+                # Use the actual CCXT method for converting pairs
+                symbol = trade.pair
+                if symbol in trade_symbols:
+                    trade.delete()
+                    self.rpc.send_msg({
+                        "type": RPCMessageType.STATUS,
+                        "status": f"Deleted duplicate trade {trade.id} for {trade.pair}"
+                    })
+                    continue
+
                 trade_symbols.add(symbol)
                 if symbol not in position_map:
-                    logger.warning(
-                        f"Trade {trade} has no matching position on the exchange. "
-                        "Position may have been closed externally. Deleting trade from database."
-                    )
-
                     # Send notification before deleting the trade
                     self.rpc.send_msg({
                         "type": RPCMessageType.STATUS,
@@ -420,28 +490,33 @@ class FreqtradeBot(LoggingMixin):
 
                     # Delete the trade and its orders from the database
                     trade.delete()
-                else:
-                    # 2. Update existing trade to match position details
-                    position = position_map[symbol]
+                    continue
 
-                    trade.amount = abs(position.position)
-                    trade.open_rate = position.open_rate
-                    trade.recalc_open_trade_value()
-                    self.rpc.send_msg({
-                        "type": RPCMessageType.STATUS,
-                        "status": f"Updated trade {trade.id} for {trade.pair} to match position size {trade.amount}"
-                    })
+                # 2. Update existing trade to match position details
+                position = position_map[symbol]
+
+                # Update trade with position details
+                trade.amount = abs(position.position)
+                trade.open_rate = position.open_rate
+                # Make sure we maintain consistent is_short value
+                trade.is_short = position.side == 'short'
+                trade.recalc_open_trade_value()
+
+                self.rpc.send_msg({
+                    "type": RPCMessageType.STATUS,
+                    "status": f"Updated trade {trade.id} for {trade.pair} to match position size {trade.amount}"
+                })
 
             # 3. Find positions without corresponding trades and create new trades
             missing_positions = position_map.keys() - trade_symbols
             for symbol in missing_positions:
                 position = position_map[symbol]
-                pair = symbol.rstrip(':USDT')
+                pair = symbol
 
                 # Create the trade object
                 trade = Trade(
                     pair=pair,
-                    stake_amount=position.notional_value,  # Stake amount is unknown
+                    stake_amount=position.notional_value,  # Stake amount is estimated
                     open_rate=position.open_rate,
                     amount=position.position,
                     open_date=datetime.now(UTC),  # We don't know the actual open time
@@ -449,7 +524,7 @@ class FreqtradeBot(LoggingMixin):
                     fee_open=self.exchange.get_fee(pair),
                     fee_close=self.exchange.get_fee(pair),
                     exchange=self.exchange.id,
-                    is_short=position.position < 0,
+                    is_short=position.side == 'short',
                     leverage=position.leverage,
                     trading_mode=self.trading_mode,
                     amount_precision=self.exchange.get_precision_amount(pair),
@@ -469,7 +544,8 @@ class FreqtradeBot(LoggingMixin):
                 # Notify about the new trade
                 self.rpc.send_msg({
                     "type": RPCMessageType.STATUS,
-                    "status": f"Created new trade {trade.id} for {pair} based on existing exchange position"
+                    "status": f"Created new trade for {pair} based on existing position. "
+                              f"Size: {abs(position.position)}, Rate: {position.open_rate}"
                 })
 
             # Commit all changes to the database
@@ -2290,7 +2366,7 @@ class FreqtradeBot(LoggingMixin):
                 amount=amount,
                 rate=limit,
                 leverage=trade.leverage,
-                reduceOnly=self.trading_mode == TradingMode.FUTURES,
+                reduceOnly=self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN),
                 time_in_force=time_in_force,
             )
         except InsufficientFundsError as e:

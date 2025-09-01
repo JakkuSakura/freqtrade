@@ -1324,6 +1324,69 @@ class RPC:
             'fiat_display_currency': fiat_display_currency,
         }
 
+    def _rpc_close_all_positions(self) -> dict[str, str | list[str]]:
+        """
+        Handler for closing all open positions.
+        Uses the exchange API directly to close all positions in futures mode.
+        """
+        if self._freqtrade.state == State.STOPPED:
+            raise RPCException("trader is not running")
+            
+        # Check trading mode - only works in futures or portfolio_margin mode
+        trading_mode = self._config.get('trading_mode', 'spot')
+        if trading_mode not in ['futures', 'portfolio_margin']:
+            raise RPCException('This command only works with futures or portfolio margin trading mode.')
+        
+        try:
+            exchange = self._freqtrade.exchange
+            
+            # Use the exchange to fetch positions directly
+            positions = exchange.fetch_positions()
+            
+            closed_positions = 0
+            results = []
+            
+            # Close each position
+            for position in positions:
+                # Only process positions with non-zero size
+                position_size = abs(position['contracts'])
+                if position_size <= 0:
+                    continue
+                    
+                is_short = position['contracts'] < 0
+                side = 'buy' if is_short else 'sell'
+                
+                if self._config.get('dry_run', False):
+                    # In dry-run mode, just log what would happen
+                    results.append(f"Dry run: Would close position {position['symbol']} with {side} order of {position_size}")
+                else:
+                    try:
+                        # Create market order to close position
+                        order = exchange.create_order(
+                            pair=position['symbol'],
+                            ordertype='market',
+                            side=side,
+                            amount=position_size,
+                            rate=0,
+                            leverage=1.0,
+                            reduceOnly=True,
+                        )
+                        results.append(f"Position {position['symbol']} closed with order: {order.get('id')}")
+                        closed_positions += 1
+                    except Exception as e:
+                        results.append(f"Error closing position {position['symbol']}: {e}")
+            
+            if closed_positions > 0:
+                return {"result": f"Successfully closed {closed_positions} positions.", "details": results}
+            else:
+                return {
+                    "result": "No positions were closed. Either there were no open positions or all close operations failed.",
+                    "details": results
+                }
+                
+        except Exception as e:
+            raise RPCException(f"Error while closing positions: {e}")
+
     def _rpc_open_orders(self) -> dict:
         """Returns open orders from the exchange
         

@@ -296,7 +296,8 @@ class Wallets:
             position = self._positions.get(trade.pair)
             if position is None:
                 # We don't own anything :O
-                return False
+                self._local_log(f'No position found for trade {trade.id}, assuming 0 balance.', level="warning")
+                return True
             wallet_amount = position.position
 
         if wallet_amount >= trade.amount:

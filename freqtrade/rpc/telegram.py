@@ -171,7 +171,7 @@ class Telegram(RPCHandler):
             ["/daily", "/profit", "/balance", "/position"],
             ["/status", "/status table", "/performance"],
             ["/count", "/start", "/stop", "/help"],
-            ["/forceexit"],
+            ["/forceexit", "/forcexit2"],
         ]
         # do not allow commands with mandatory arguments and critical cmds
         # TODO: DRY! - its not good to list all valid cmds here. But otherwise
@@ -218,6 +218,7 @@ class Telegram(RPCHandler):
             r"/forceshort$",
             r"/forcesell$",
             r"/forceexit$",
+            r"/forcexit2$",
             r"/health$",
             r"/help$",
             r"/version$",
@@ -247,6 +248,7 @@ class Telegram(RPCHandler):
                 logger.info(f"using custom keyboard from config.json: {self._keyboard}")
 
     def _init_telegram_app(self):
+        """Initialize the Telegram application with the token from config"""
         return Application.builder().token(self._config["telegram"]["token"]).build()
 
     def _init(self) -> None:
@@ -263,6 +265,10 @@ class Telegram(RPCHandler):
             asyncio.set_event_loop(self._loop)
 
         self._app = self._init_telegram_app()
+        
+        # Store message IDs for auto-refresh functionality
+        self._position_message_ids = {}
+        self._orders_message_ids = {}
 
         # Register command handler and start telegram message polling
         handles = [
@@ -272,6 +278,7 @@ class Telegram(RPCHandler):
             CommandHandler("start", self._start),
             CommandHandler("stop", self._stop),
             CommandHandler(["forcesell", "forceexit", "fx"], self._force_exit),
+            CommandHandler(["forcexit2"], self._force_exit2),
             CommandHandler(
                 ["forcebuy", "forcelong"],
                 partial(self._force_enter, order_side=SignalDirection.LONG),
@@ -334,6 +341,7 @@ class Telegram(RPCHandler):
             CallbackQueryHandler(self._mix_tag_performance, pattern="update_mix_tag_performance"),
             CallbackQueryHandler(self._count, pattern="update_count"),
             CallbackQueryHandler(self._force_exit_inline, pattern=r"force_exit__\S+"),
+            CallbackQueryHandler(self._force_exit2_inline, pattern=r"force_exit2__\S+"),
             CallbackQueryHandler(self._force_enter_inline, pattern=r"force_enter__\S+"),
         ]
         for handle in handles:
@@ -341,6 +349,17 @@ class Telegram(RPCHandler):
 
         for callback in callbacks:
             self._app.add_handler(callback)
+            
+        # Setup job queue for auto-refresh of messages
+        if self._config["telegram"].get("auto_refresh", False):
+            refresh_interval = self._config["telegram"].get("refresh_interval", 10)
+            self._app.job_queue.run_repeating(
+                self._refresh_positions_orders, 
+                interval=refresh_interval, 
+                first=refresh_interval,
+                name="refresh_positions_orders"
+            )
+            logger.info(f"Telegram auto-refresh enabled with interval of {refresh_interval} seconds")
 
         logger.info(
             "rpc.telegram is listening for following commands: %s",
@@ -717,6 +736,57 @@ class Telegram(RPCHandler):
             )
             lines.extend(lines_detail if lines_detail else "")
             await self.__send_order_msg(lines, r)
+
+    @authorized_only
+    async def _force_exit2(self, update: Update, context: CallbackContext) -> None:
+        """
+        Handler for /forcexit2.
+        Uses the close_all_positions script to close all open positions
+        :param update: message update
+        :param context: CallbackContext
+        :return: None
+        """
+        # Check trading mode - only works in futures or portfolio_margin mode
+        trading_mode = self._config.get('trading_mode', 'spot')
+        if trading_mode not in ['futures', 'portfolio_margin']:
+            await self._send_msg('❌ This command only works with futures or portfolio margin trading mode.')
+            return
+
+        # Confirm with the user
+        confirmation_message = (
+            "*⚠️ Warning: This will close ALL open positions ⚠️*\n\n"
+            "Are you sure you want to close all positions immediately?\n"
+            "This action cannot be undone."
+        )
+
+        buttons = [
+            [
+                InlineKeyboardButton(text="Yes, close all positions", callback_data="force_exit2__confirm"),
+                InlineKeyboardButton(text="Cancel", callback_data="force_exit2__cancel")
+            ],
+        ]
+        await self._send_msg(confirmation_message, keyboard=buttons)
+
+    async def _force_exit2_action(self) -> None:
+        """
+        Executes the close_all_positions RPC method to close all open positions
+        """
+        try:
+            # Call the RPC method to close all positions
+            result = self._rpc._rpc_close_all_positions()
+            
+            # Send result message
+            await self._send_msg(f"*{result['result']}*")
+            
+            # Send detailed messages for each position
+            if 'details' in result and result['details']:
+                for detail in result['details']:
+                    await self._send_msg(detail)
+                    
+        except RPCException as e:
+            await self._send_msg(f"❌ {str(e)}")
+        except Exception as e:
+            await self._send_msg(f"❌ Error while closing positions: {e}")
 
     async def __send_order_msg(self, lines: list[str], r: dict[str, Any]) -> None:
         """
@@ -1406,9 +1476,15 @@ class Telegram(RPCHandler):
                 f"\t`{fiat_display_currency} Unrealized PnL: {fiat_profit_prefix}{fiat_profit:.2f}`\n"
             )
         
-        await self._send_msg(
-            output, reload_able=True, callback_path="update_position", query=update.callback_query
+        message = await self._send_msg(
+            output, reload_able=True, callback_path="update_position", query=update.callback_query,
+            return_message=True
         )
+        
+        # Store message ID for auto-refresh if enabled
+        if message and self._config["telegram"].get("auto_refresh", False):
+            chat_id = self._config["telegram"]["chat_id"]
+            self._position_message_ids[chat_id] = message.message_id
         
     @authorized_only
     async def _open_orders(self, update: Update, context: CallbackContext) -> None:
@@ -1472,9 +1548,15 @@ class Telegram(RPCHandler):
         output += f"\n*Order Summary:*\n"
         output += f"\t`Total Open Orders: {total_orders}`\n"
         
-        await self._send_msg(
-            output, reload_able=True, callback_path="update_open_orders", query=update.callback_query
+        message = await self._send_msg(
+            output, reload_able=True, callback_path="update_open_orders", query=update.callback_query,
+            return_message=True
         )
+        
+        # Store message ID for auto-refresh if enabled
+        if message and self._config["telegram"].get("auto_refresh", False):
+            chat_id = self._config["telegram"]["chat_id"]
+            self._orders_message_ids[chat_id] = message.message_id
 
     @authorized_only
     async def _start(self, update: Update, context: CallbackContext) -> None:
@@ -1581,6 +1663,21 @@ class Telegram(RPCHandler):
             except RPCException as e:
                 await self._send_msg(str(e))
 
+    async def _force_exit2_inline(self, update: Update, _: CallbackContext) -> None:
+        if update.callback_query:
+            query = update.callback_query
+            if query.data and "__" in query.data:
+                # Input data is "force_exit2__<confirm|cancel>"
+                action = query.data.split("__")[1]
+                if action == "cancel":
+                    await query.answer()
+                    await query.edit_message_text(text="Force exit all positions canceled.")
+                    return
+                elif action == "confirm":
+                    await query.answer()
+                    await query.edit_message_text(text="Closing all positions. Please wait...")
+                    await self._force_exit2_action()
+                    
     async def _force_exit_inline(self, update: Update, _: CallbackContext) -> None:
         if update.callback_query:
             query = update.callback_query
@@ -2062,6 +2159,7 @@ class Telegram(RPCHandler):
             "*/forceexit <trade_id>|all:* `Instantly exits the given trade or all trades, "
             "regardless of profit`\n"
             "*/fx <trade_id>|all:* `Alias to /forceexit`\n"
+            "*/forcexit2:* `Instantly closes all open positions (futures mode only)`\n"
             f"{force_enter_text if self._config.get('force_entry_enable', False) else ''}"
             "*/delete <trade_id>:* `Instantly delete the given trade in the database`\n"
             "*/reload_trade <trade_id>:* `Reload trade from exchange Orders`\n"
@@ -2248,7 +2346,7 @@ class Telegram(RPCHandler):
         callback_path: str = "",
         reload_able: bool = False,
         parse_mode: str = ParseMode.MARKDOWN,
-    ) -> None:
+    ) -> Message | None:
         if reload_able:
             reply_markup = InlineKeyboardMarkup(
                 [
@@ -2262,16 +2360,19 @@ class Telegram(RPCHandler):
             return
 
         try:
-            await query.edit_message_text(
+            message = await query.edit_message_text(
                 text=msg, parse_mode=parse_mode, reply_markup=reply_markup
             )
+            return message
         except BadRequest as e:
             if "not modified" in e.message.lower():
-                pass
+                return query.message
             else:
                 logger.warning("TelegramError: %s", e.message)
+                return None
         except TelegramError as telegram_err:
             logger.warning("TelegramError: %s! Giving up on that message.", telegram_err.message)
+            return None
 
     async def _send_msg(
         self,
@@ -2282,7 +2383,8 @@ class Telegram(RPCHandler):
         callback_path: str = "",
         reload_able: bool = False,
         query: CallbackQuery | None = None,
-    ) -> None:
+        return_message: bool = False,
+    ) -> Message | None:
         """
         Send given markdown message
         :param msg: message
@@ -2292,14 +2394,14 @@ class Telegram(RPCHandler):
         """
         reply_markup: InlineKeyboardMarkup | ReplyKeyboardMarkup
         if query:
-            await self._update_msg(
+            message = await self._update_msg(
                 query=query,
                 msg=msg,
                 parse_mode=parse_mode,
                 callback_path=callback_path,
                 reload_able=reload_able,
             )
-            return
+            return message if return_message else None
         if reload_able and self._config["telegram"].get("reload", True):
             reply_markup = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("Refresh", callback_data=callback_path)]]
@@ -2311,7 +2413,7 @@ class Telegram(RPCHandler):
                 reply_markup = ReplyKeyboardMarkup(self._keyboard, resize_keyboard=True)
         try:
             try:
-                await self._app.bot.send_message(
+                message = await self._app.bot.send_message(
                     self._config["telegram"]["chat_id"],
                     text=msg,
                     parse_mode=parse_mode,
@@ -2319,13 +2421,14 @@ class Telegram(RPCHandler):
                     disable_notification=disable_notification,
                     message_thread_id=self._config["telegram"].get("topic_id"),
                 )
+                return message if return_message else None
             except NetworkError as network_err:
                 # Sometimes the telegram server resets the current connection,
                 # if this is the case we send the message again.
                 logger.warning(
                     "Telegram NetworkError: %s! Trying one more time.", network_err.message
                 )
-                await self._app.bot.send_message(
+                message = await self._app.bot.send_message(
                     self._config["telegram"]["chat_id"],
                     text=msg,
                     parse_mode=parse_mode,
@@ -2333,8 +2436,10 @@ class Telegram(RPCHandler):
                     disable_notification=disable_notification,
                     message_thread_id=self._config["telegram"].get("topic_id"),
                 )
+                return message if return_message else None
         except TelegramError as telegram_err:
             logger.warning("TelegramError: %s! Giving up on that message.", telegram_err.message)
+            return None
 
     @authorized_only
     async def _changemarketdir(self, update: Update, context: CallbackContext) -> None:
@@ -2378,6 +2483,185 @@ class Telegram(RPCHandler):
                 "Usage: */marketdir [short |  long | even | none]*"
             )
 
+    async def _refresh_positions_orders(self, context: CallbackContext) -> None:
+        """
+        Handler for the job queue - refreshes position and order information automatically.
+        Called by the job queue based on the interval specified in the config.
+        """
+        try:
+            if not self._position_message_ids and not self._orders_message_ids:
+                return  # No messages to refresh
+                
+            # Refresh positions if any position messages exist
+            if self._position_message_ids:
+                chat_id = self._config["telegram"]["chat_id"]
+                message_id = self._position_message_ids.get(chat_id)
+                if message_id:
+                    try:
+                        # Get fresh position data
+                        stake_currency = self._config["stake_currency"]
+                        fiat_display_currency = self._config.get("fiat_display_currency", "")
+                        
+                        # Check if we're in futures mode
+                        if self._config.get("trading_mode", "spot") not in ("futures", "portfolio_margin"):
+                            return
+                            
+                        # Get position information from RPC
+                        result = self._rpc._rpc_position(stake_currency, fiat_display_currency)
+                        positions = result["positions"]
+                        
+                        # Format the position message
+                        output = ""
+                        if self._config["dry_run"]:
+                            output += "*Warning:* Simulated positions in Dry Mode.\n"
+                            
+                        if not positions:
+                            output += "*No open positions found.*\n"
+                        else:
+                            for position in positions:
+                                # Get detailed position information
+                                leverage_text = f" ({position['leverage']}x)" if position.get('leverage') else ""
+                                unrealized_pnl = position.get('unrealized_pnl', 0.0)
+                                unrealized_pnl_text = f"+{unrealized_pnl:.8f}" if unrealized_pnl >= 0 else f"{unrealized_pnl:.8f}"
+                                
+                                curr_output = (
+                                    f"*{position['symbol']}:*\n"
+                                    f"\t`Side: {position['side']}{leverage_text}`\n"
+                                    f"\t`Position Size: {position['position']:.8f}`\n"
+                                    f"\t`Collateral: {fmt_coin(position['collateral'], stake_currency)}`\n"
+                                    f"\t`Unrealized PnL: {unrealized_pnl_text} {stake_currency}`\n"
+                                )
+                                output += curr_output
+                                
+                            # Add summary information
+                            total_collateral = fmt_coin(result["total_collateral"], stake_currency)
+                            total_unrealized_profit = result["total_unrealized_profit"]
+                            profit_prefix = "+" if total_unrealized_profit >= 0 else ""
+                            
+                            output += (
+                                f"\n*Position Summary:*\n"
+                                f"\t`Total Collateral: {total_collateral}`\n"
+                                f"\t`Total Unrealized PnL: {profit_prefix}{total_unrealized_profit:.8f} {stake_currency}`\n"
+                            )
+                            
+                            # Add fiat values if available
+                            if fiat_display_currency and result.get("fiat_total_collateral"):
+                                fiat_collateral = result["fiat_total_collateral"]
+                                fiat_profit = result["fiat_total_unrealized_profit"]
+                                fiat_profit_prefix = "+" if fiat_profit >= 0 else ""
+                                
+                                output += (
+                                    f"\t`{fiat_display_currency} Value: {fiat_collateral:.2f}`\n"
+                                    f"\t`{fiat_display_currency} Unrealized PnL: {fiat_profit_prefix}{fiat_profit:.2f}`\n"
+                                )
+                        
+                        # Add timestamp
+                        output += f"\nUpdated: {datetime.now().ctime()}"
+                        
+                        # Create reply markup with refresh button
+                        reply_markup = InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("Refresh", callback_data="update_position")]]
+                        )
+                        
+                        # Edit the message with updated data
+                        await self._app.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=output,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=reply_markup,
+                            message_thread_id=self._config["telegram"].get("topic_id"),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error refreshing position message: {e}")
+                        # Message might have been deleted or become invalid
+                        if chat_id in self._position_message_ids:
+                            del self._position_message_ids[chat_id]
+            
+            # Refresh orders if any order messages exist
+            if self._orders_message_ids:
+                chat_id = self._config["telegram"]["chat_id"]
+                message_id = self._orders_message_ids.get(chat_id)
+                if message_id:
+                    try:
+                        # Get fresh order data
+                        stake_currency = self._config["stake_currency"]
+                        
+                        # Get open orders from RPC
+                        result = self._rpc._rpc_open_orders()
+                        orders = result.get("orders", [])
+                        
+                        # Format the orders message
+                        output = ""
+                        if self._config["dry_run"]:
+                            output += "*Warning:* Simulated open orders in Dry Mode.\n"
+                            
+                        if not orders:
+                            output += "*No open orders found.*\n"
+                        else:
+                            for order in orders:
+                                # Format order details
+                                symbol = order.get('symbol', '')
+                                order_id = order.get('id', '')
+                                order_type = order.get('type', '').upper()
+                                side = order.get('side', '').upper()
+                                price = order.get('price', 0.0)
+                                amount = order.get('amount', 0.0)
+                                filled = order.get('filled', 0.0)
+                                remaining = order.get('remaining', 0.0)
+                                status = order.get('status', '').upper()
+                                date = order.get('datetime', '')
+                                trade_id = order.get('ft_trade_id', None)
+                                order_tag = order.get('ft_order_tag', None)
+                                
+                                curr_output = (
+                                    f"*{symbol}* - ID: `{order_id}`\n"
+                                    f"\t`Trade ID: {trade_id if trade_id else 'N/A'}`\n"
+                                    f"\t`Type: {order_type} {side}`\n"
+                                    f"\t`Price: {fmt_coin2(price, stake_currency)}`\n"
+                                    f"\t`Amount: {round_value(amount, 8)}`\n"
+                                    f"\t`Filled: {round_value(filled, 8)}`\n"
+                                    f"\t`Remaining: {round_value(remaining, 8)}`\n"
+                                    f"\t`Status: {status}`\n"
+                                    f"\t`Date: {date}`\n"
+                                )
+                                
+                                if order_tag:
+                                    curr_output += f"\t`Tag: {order_tag}`\n"
+                                
+                                output += curr_output
+                            
+                            # Add summary information
+                            total_orders = len(orders)
+                            output += f"\n*Order Summary:*\n"
+                            output += f"\t`Total Open Orders: {total_orders}`\n"
+                        
+                        # Add timestamp
+                        output += f"\nUpdated: {datetime.now().ctime()}"
+                        
+                        # Create reply markup with refresh button
+                        reply_markup = InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("Refresh", callback_data="update_open_orders")]]
+                        )
+                        
+                        # Edit the message with updated data
+                        await self._app.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=output,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=reply_markup,
+                            message_thread_id=self._config["telegram"].get("topic_id"),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error refreshing orders message: {e}")
+                        # Message might have been deleted or become invalid
+                        if chat_id in self._orders_message_ids:
+                            del self._orders_message_ids[chat_id]
+                            
+        except Exception as e:
+            logger.error(f"Error in refresh job: {e}")
+            
     async def _tg_info(self, update: Update, context: CallbackContext) -> None:
         """
         Intentionally unauthenticated Handler for /tg_info.
