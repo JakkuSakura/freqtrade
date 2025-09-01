@@ -330,6 +330,12 @@ class Binance(Exchange):
             balances.pop("debt", None)
 
             self._log_exchange_response("fetch_balances", balances)
+
+            for balance in balances.values():
+                if not isinstance(balance, dict):
+                    continue
+                balance['free'] = balance['total']
+                balance['used'] = 0
             return balances
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
