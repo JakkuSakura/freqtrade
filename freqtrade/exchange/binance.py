@@ -8,7 +8,7 @@ from typing import Any
 import ccxt
 from pandas import DataFrame
 
-from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS, BuySell
+from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS, BuySell, Config
 from freqtrade.enums import CandleType, MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError, InvalidOrderException, \
     RetryableOrderError, InsufficientFundsError
@@ -93,7 +93,14 @@ class Binance(Exchange):
         (TradingMode.FUTURES, MarginMode.ISOLATED),
         (TradingMode.PORTFOLIO_MARGIN, MarginMode.CROSS),
     ]
-
+    def validate_config(self, config: Config) -> None:
+        super().validate_config(config)
+        assert config['exchange']['ccxt_config'] == {
+            "options": {
+                "portfolioMargin": True,
+                "defaultType": "future"
+            }
+        }
     def get_proxy_coin(self) -> str:
         """
         Get the proxy coin for the given coin
