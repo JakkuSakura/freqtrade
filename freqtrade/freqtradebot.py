@@ -156,7 +156,7 @@ class FreqtradeBot(LoggingMixin):
 
         self._schedule = Scheduler()
 
-        self._schedule.every().minute.do(self.refresh_positions_orders_trades)
+        self._schedule.every().hour.do(self.refresh_positions_orders_trades)
         if self.trading_mode == TradingMode.FUTURES:
 
             def update():
