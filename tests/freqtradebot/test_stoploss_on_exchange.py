@@ -1,13 +1,18 @@
 from copy import deepcopy
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import ANY, MagicMock
 
 import pytest
 from sqlalchemy import select
 
 from freqtrade.enums import ExitCheckTuple, ExitType, RPCMessageType
-from freqtrade.exceptions import ExchangeError, InsufficientFundsError, InvalidOrderException
-from freqtrade.freqtradebot import FreqtradeBot
+from freqtrade.exceptions import (
+    ExchangeError,
+    InsufficientFundsError,
+    InvalidOrderException,
+    TemporaryError,
+)
+from freqtrade.freqtradebot import FreqtradeBot, STOPLOSS_RETRY_KEY
 from freqtrade.persistence import Order, Trade
 from freqtrade.persistence.models import PairLock
 from freqtrade.util.datetime_helpers import dt_now
@@ -445,6 +450,44 @@ def test_handle_sle_cancel_cant_recreate(
     assert log_has_re(r"All Stoploss orders are cancelled, but unable to recreate one\.", caplog)
     assert trade.has_open_sl_orders is False
     assert trade.is_open is True
+
+
+def test_stoploss_retry_interval_cools_down(mocker, default_conf_usdt, limit_order, fee) -> None:
+    patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    mocker.patch.multiple(
+        EXMS,
+        fetch_ticker=MagicMock(return_value={"bid": 1.9, "ask": 2.2, "last": 1.9}),
+        create_order=MagicMock(return_value=limit_order["buy"]),
+        get_fee=fee,
+    )
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    freqtrade.strategy.order_types["stoploss_on_exchange"] = True
+    freqtrade.strategy.order_types["stoploss_on_exchange_retry_interval"] = 30
+
+    patch_get_signal(freqtrade, enter_long=True, enter_short=False)
+
+    freqtrade.enter_positions()
+    trade = Trade.session.scalars(select(Trade)).first()
+    assert trade
+
+    stop_price = 1.8
+
+    freqtrade.exchange.create_stoploss = MagicMock(side_effect=TemporaryError("rate limit"))
+    assert freqtrade.create_stoploss_order(trade, stop_price) is False
+    retry_not_before = trade.get_custom_data(STOPLOSS_RETRY_KEY)
+    assert retry_not_before is not None
+    assert datetime.fromtimestamp(float(retry_not_before), tz=UTC) > dt_now()
+
+    freqtrade.exchange.create_stoploss.reset_mock()
+    assert freqtrade.create_stoploss_order(trade, stop_price) is False
+    freqtrade.exchange.create_stoploss.assert_not_called()
+
+    trade.set_custom_data(STOPLOSS_RETRY_KEY, dt_now().timestamp() - 5)
+    freqtrade.exchange.create_stoploss = MagicMock(return_value={"id": "retry", "status": "open"})
+    assert freqtrade.create_stoploss_order(trade, stop_price) is True
+    assert trade.get_custom_data(STOPLOSS_RETRY_KEY) is None
 
 
 @pytest.mark.parametrize("is_short", [False, True])

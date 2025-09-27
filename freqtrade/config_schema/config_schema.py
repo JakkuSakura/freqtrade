@@ -390,6 +390,13 @@ CONF_SCHEMA = {
                     "description": "Interval for stop loss on exchange in seconds.",
                     "type": "number",
                 },
+                "stoploss_on_exchange_retry_interval": {
+                    "description": (
+                        "Cooldown in seconds before retrying stop loss creation after a failure."
+                    ),
+                    "type": "number",
+                    "minimum": 0,
+                },
                 "stoploss_on_exchange_limit_ratio": {
                     "description": "Limit ratio for stop loss on exchange.",
                     "type": "number",

@@ -221,6 +221,7 @@ class OrderTypes(BaseModel):
     stoploss: OrderTypeValues
     stoploss_on_exchange: bool
     stoploss_on_exchange_interval: int | None = None
+    stoploss_on_exchange_retry_interval: int | None = None
 
 
 class ShowConfig(BaseModel):

@@ -67,6 +67,10 @@ The bot cannot do these every 5 seconds (at each iteration), otherwise it would 
 So this parameter will tell the bot how often it should update the stoploss order. The default value is 60 (1 minute).
 This same logic will reapply a stoploss order on the exchange should you cancel it accidentally.
 
+### stoploss_on_exchange_retry_interval
+
+When a stoploss order cannot be placed (for example due to an exchange rate limit response), `stoploss_on_exchange_retry_interval` defines how long Freqtrade should wait before trying again. The value is expressed in seconds and defaults to `10`. Increasing this value can help to avoid repeated order attempts that might trigger additional rate limits on the exchange.
+
 ### stoploss_price_type
 
 !!! Warning "Only applies to futures"
@@ -102,6 +106,7 @@ order_types = {
     "stoploss": "market",
     "stoploss_on_exchange": True,
     "stoploss_on_exchange_interval": 60,
+    "stoploss_on_exchange_retry_interval": 10,
     "stoploss_on_exchange_limit_ratio": 0.99
 }
 ```

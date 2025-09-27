@@ -96,6 +96,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         "stoploss": "limit",
         "stoploss_on_exchange": False,
         "stoploss_on_exchange_interval": 60,
+        "stoploss_on_exchange_retry_interval": 10,
     }
 
     # Optional time in force

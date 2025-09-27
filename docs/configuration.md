@@ -513,7 +513,7 @@ stoploss "on exchange" which means stoploss order would be placed immediately on
 
 If this is configured, the following 4 values (`entry`, `exit`, `stoploss` and `stoploss_on_exchange`) need to be present, otherwise, the bot will fail to start.
 
-For information on (`emergency_exit`,`force_exit`, `force_entry`, `stoploss_on_exchange`,`stoploss_on_exchange_interval`,`stoploss_on_exchange_limit_ratio`) please see stop loss documentation [stop loss on exchange](stoploss.md)
+For information on (`emergency_exit`,`force_exit`, `force_entry`, `stoploss_on_exchange`,`stoploss_on_exchange_interval`,`stoploss_on_exchange_retry_interval`,`stoploss_on_exchange_limit_ratio`) please see stop loss documentation [stop loss on exchange](stoploss.md)
 
 Syntax for Strategy:
 
@@ -527,6 +527,7 @@ order_types = {
     "stoploss": "market",
     "stoploss_on_exchange": False,
     "stoploss_on_exchange_interval": 60,
+    "stoploss_on_exchange_retry_interval": 10,
     "stoploss_on_exchange_limit_ratio": 0.99,
 }
 ```
@@ -542,7 +543,8 @@ Configuration:
     "force_exit": "market",
     "stoploss": "market",
     "stoploss_on_exchange": false,
-    "stoploss_on_exchange_interval": 60
+    "stoploss_on_exchange_interval": 60,
+    "stoploss_on_exchange_retry_interval": 10
 }
 ```
 
@@ -555,7 +557,7 @@ Configuration:
     Please carefully read the section [Market order pricing](#market-order-pricing) section when using market orders.
 
 !!! Note "Stoploss on exchange"
-    `order_types.stoploss_on_exchange_interval` is not mandatory. Do not change its value if you are
+    `order_types.stoploss_on_exchange_interval` and `order_types.stoploss_on_exchange_retry_interval` are not mandatory. Do not change their values if you are
     unsure of what you are doing. For more information about how stoploss works please
     refer to [the stoploss documentation](stoploss.md).
 

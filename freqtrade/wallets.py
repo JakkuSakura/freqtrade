@@ -11,6 +11,14 @@ from freqtrade.exceptions import DependencyException
 from freqtrade.exchange import Exchange
 from freqtrade.misc import safe_value_fallback
 from freqtrade.persistence import LocalTrade, Trade
+from freqtrade.state import (
+    PositionSnapshot,
+    RefreshMeta,
+    SnapshotBundle,
+    StateReader,
+    StateStore,
+    WalletSnapshot,
+)
 from freqtrade.util.datetime_helpers import dt_now
 
 
@@ -37,13 +45,22 @@ class PositionWallet(NamedTuple):
 
 
 class Wallets:
-    def __init__(self, config: Config, exchange: Exchange, is_backtest: bool = False) -> None:
+    def __init__(
+            self,
+            config: Config,
+            exchange: Exchange,
+            is_backtest: bool = False,
+            state_store: StateStore | None = None,
+            state_reader: StateReader | None = None,
+    ) -> None:
         self._config = config
         self._is_backtest = is_backtest
         self._exchange = exchange
         self._wallets: dict[str, Wallet] = {}
         self._positions: dict[str, PositionWallet] = {}
         self._start_cap: dict[str, float] = {}
+        self._state_store = state_store
+        self._state_reader = state_reader
 
         self._stake_currency = self._exchange.get_proxy_coin()
 
@@ -55,22 +72,30 @@ class Wallets:
         self._last_wallet_refresh: datetime | None = None
         self.update()
 
+    def _wallet_from_state(self, currency: str) -> Wallet | None:
+        if not self._state_reader:
+            return None
+        snapshot = self._state_reader.wallet(currency)
+        if snapshot:
+            return Wallet(currency, snapshot.free, snapshot.locked, snapshot.total)
+        return None
+
     def get_free(self, currency: str) -> float:
-        balance = self._wallets.get(currency)
+        balance = self._wallet_from_state(currency) or self._wallets.get(currency)
         if balance and balance.free:
             return balance.free
         else:
             return 0
 
     def get_used(self, currency: str) -> float:
-        balance = self._wallets.get(currency)
+        balance = self._wallet_from_state(currency) or self._wallets.get(currency)
         if balance and balance.used:
             return balance.used
         else:
             return 0
 
     def get_total(self, currency: str) -> float:
-        balance = self._wallets.get(currency)
+        balance = self._wallet_from_state(currency) or self._wallets.get(currency)
         if balance and balance.total:
             return balance.total
         else:
@@ -259,7 +284,58 @@ class Wallets:
 
         self._wallets["USD"] = Wallet("USD", total_equity_usd, total_equity_usd, 0)
 
-    def update(self, require_update: bool = True) -> None:
+    def _publish_wallet_state(self) -> None:
+        """Push the latest wallet snapshot into the shared state store."""
+        if not self._state_store:
+            return
+
+        fetched_at = dt_now()
+        sequence = self._state_store.version + 1
+        snapshots = tuple(
+            WalletSnapshot(
+                currency=currency,
+                free=wallet.free,
+                locked=wallet.used,
+                total=wallet.total,
+                meta=RefreshMeta(
+                    source="wallets-legacy",
+                    fetched_at=fetched_at,
+                    latency_ms=0,
+                    sequence=sequence,
+                ),
+            )
+            for currency, wallet in self._wallets.items()
+        )
+        position_snapshots = tuple(
+            PositionSnapshot(
+                symbol=symbol,
+                size=position.position,
+                side=position.side,
+                entry_price=position.open_rate or 0.0,
+                collateral=position.collateral,
+                leverage=position.leverage,
+                unrealized_pnl=position.unrealized_pnl,
+                extra={
+                    "notional_value": position.notional_value,
+                },
+                meta=RefreshMeta(
+                    source="wallets-legacy",
+                    fetched_at=fetched_at,
+                    latency_ms=0,
+                    sequence=sequence,
+                ),
+            )
+            for symbol, position in self._positions.items()
+        )
+        if snapshots or position_snapshots:
+            self._state_store.apply(
+                SnapshotBundle(
+                    wallets=snapshots if snapshots else (),
+                    positions=position_snapshots if position_snapshots else (),
+                )
+            )
+
+    def update(self, require_update: bool = True, *, publish_state: bool = True) -> None:
         """
         Updates wallets from the configured version.
         By default, updates from the exchange.
@@ -278,13 +354,45 @@ class Wallets:
             else:
                 self._update_dry()
             self._calculate_equity_and_update_usd_wallet()
+            if publish_state:
+                self._publish_wallet_state()
             self._local_log("Wallets synced.")
             self._last_wallet_refresh = dt_now()
 
     def get_all_balances(self) -> dict[str, Wallet]:
+        if self._state_reader:
+            snapshots = self._state_reader.wallets()
+            if snapshots:
+                return {
+                    currency: Wallet(currency, snap.free, snap.locked, snap.total)
+                    for currency, snap in snapshots.items()
+                }
         return self._wallets
 
+    def export_wallet_balances(self) -> dict[str, Wallet]:
+        """Return the latest raw wallet map without consulting the state store."""
+        return dict(self._wallets)
+
+    def export_position_wallets(self) -> dict[str, PositionWallet]:
+        return dict(self._positions)
+
     def get_all_positions(self) -> dict[str, PositionWallet]:
+        if self._state_reader:
+            snapshots = self._state_reader.positions()
+            if snapshots:
+                return {
+                    symbol: PositionWallet(
+                        symbol=symbol,
+                        position=snap.size,
+                        leverage=snap.leverage,
+                        collateral=snap.collateral,
+                        side=snap.side,
+                        unrealized_pnl=snap.unrealized_pnl,
+                        open_rate=snap.entry_price,
+                        notional_value=snap.extra.get("notional_value") if snap.extra else None,
+                    )
+                    for symbol, snap in snapshots.items()
+                }
         return self._positions
 
     def _check_exit_amount(self, trade: Trade) -> bool:

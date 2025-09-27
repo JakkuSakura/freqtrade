@@ -179,16 +179,49 @@ class RPC:
         }
         return val
 
+    def _get_open_trades(self, trade_ids: list[int] | None = None) -> list[Trade]:
+        """Return open trades, preferring the in-memory state manager when available."""
+        oms = getattr(self._freqtrade, "oms", None)
+        if oms:
+            trades = oms.iter_trades()
+            if trade_ids is not None:
+                trade_id_set = set(trade_ids)
+                trades = tuple(trade for trade in trades if trade.id in trade_id_set)
+            if trades:
+                return list(trades)
+
+        state_reader = getattr(self._freqtrade, "state_reader", None)
+        if state_reader:
+            snapshots = state_reader.trades()
+            if snapshots:
+                if trade_ids:
+                    wanted_ids = [tid for tid in trade_ids if str(tid) in snapshots]
+                else:
+                    wanted_ids = [int(trade_id) for trade_id in snapshots.keys()]
+
+                if wanted_ids:
+                    trade_records = (
+                        Trade.get_trades(trade_filter=[Trade.id.in_(wanted_ids)]).all()
+                    )
+                    trade_map = {trade.id: trade for trade in trade_records if trade.is_open}
+                    ordered = [trade_map[tid] for tid in wanted_ids if tid in trade_map]
+                    if ordered:
+                        return ordered
+
+        if trade_ids:
+            return Trade.get_trades(
+                trade_filter=[Trade.id.in_(trade_ids), Trade.is_open.is_(True)]
+            ).all()
+
+        return Trade.get_open_trades()
+
     def _rpc_trade_status(self, trade_ids: list[int] | None = None) -> list[dict[str, Any]]:
         """
         Below follows the RPC backend it is prefixed with rpc_ to raise awareness that it is
         a remotely exposed function
         """
         # Fetch open trades
-        if trade_ids:
-            trades: Sequence[Trade] = Trade.get_trades(trade_filter=Trade.id.in_(trade_ids)).all()
-        else:
-            trades = Trade.get_open_trades()
+        trades: Sequence[Trade] = self._get_open_trades(trade_ids)
 
         if not trades:
             raise RPCException("no active trade")
@@ -292,13 +325,11 @@ class RPC:
         :return: list of trades, list of columns, sum of fiat profit
         """
         nonspot = self._config.get("trading_mode", TradingMode.SPOT) != TradingMode.SPOT
-        if not Trade.get_open_trades():
-            raise RPCException("no active trade")
-
+        trades_status = self._rpc_trade_status()
         trades_list = []
         fiat_profit_sum = nan
         fiat_total_profit_sum = nan
-        for trade in self._rpc_trade_status():
+        for trade in trades_status:
             # Format profit as a string with the right sign
             profit = f"{trade['profit_ratio']:.2%}"
             fiat_profit = trade.get("profit_fiat", None)
@@ -363,6 +394,47 @@ class RPC:
             columns.append("# Entries")
 
         return trades_list, columns, fiat_profit_sum, fiat_total_profit_sum
+
+    def _get_open_orders(self) -> list[dict[str, Any]] | None:
+        state_reader = getattr(self._freqtrade, "state_reader", None)
+        if state_reader:
+            snapshots = state_reader.orders()
+            if snapshots:
+                orders: list[dict[str, Any]] = []
+                for snapshot in snapshots.values():
+                    extra = snapshot.extra or {}
+                    remaining = snapshot.amount - snapshot.filled
+                    orders.append(
+                        {
+                            "id": snapshot.order_id,
+                            "trade_id": snapshot.trade_id,
+                            "symbol": snapshot.symbol,
+                            "price": snapshot.price,
+                            "amount": snapshot.amount,
+                            "filled": snapshot.filled,
+                            "remaining": remaining,
+                            "type": snapshot.type,
+                            "side": snapshot.side,
+                            "status": snapshot.status,
+                            "timestamp": int(snapshot.placed_at.timestamp() * 1000)
+                            if snapshot.placed_at
+                            else None,
+                            "datetime": snapshot.placed_at.isoformat()
+                            if snapshot.placed_at
+                            else None,
+                            "ft_order_tag": extra.get("order_tag"),
+                            "ft_trade_id": snapshot.trade_id,
+                            "is_entry": extra.get("is_entry"),
+                            "is_open": extra.get(
+                                "is_open",
+                                snapshot.status not in constants.NON_OPEN_EXCHANGE_STATES,
+                            ),
+                            "ft_order_side": extra.get("ft_order_side", snapshot.side),
+                        }
+                    )
+                return orders
+
+        return None
 
     def _rpc_timeunit_profit(
             self,
@@ -773,9 +845,26 @@ class RPC:
         total = 0.0
         total_bot = 0.0
 
-        open_trades: list[Trade] = Trade.get_open_trades()
+        oms = getattr(self._freqtrade, "oms", None)
+        open_trades: list[Trade] = self._get_open_trades()
         open_assets: dict[str, Trade] = {t.safe_base_currency: t for t in open_trades}
-        self._freqtrade.wallets.update(require_update=False)
+        state_reader = getattr(self._freqtrade, "state_reader", None)
+        state_sync = getattr(self._freqtrade, "state_sync", None)
+        balances_map: dict[str, Wallet] | None = None
+
+        if state_reader and state_sync:
+            state_sync.refresh_once()
+            state_wallets = state_reader.wallets()
+            if state_wallets:
+                balances_map = {
+                    currency: Wallet(currency, snap.free, snap.locked, snap.total)
+                    for currency, snap in state_wallets.items()
+                }
+
+        if balances_map is None:
+            self._freqtrade.wallets.update(require_update=False)
+            balances_map = self._freqtrade.wallets.get_all_balances()
+
         starting_capital = self._freqtrade.wallets.get_starting_balance()
         starting_cap_fiat = (
             self._fiat_converter.convert_amount(
@@ -786,7 +875,7 @@ class RPC:
         )
         coin: str
         balance: Wallet
-        for coin, balance in self._freqtrade.wallets.get_all_balances().items():
+        for coin, balance in balances_map.items():
             if not balance.total and not balance.free:
                 continue
 
@@ -839,7 +928,10 @@ class RPC:
             else 0
         )
 
-        trade_count = len(Trade.get_trades_proxy())
+        if oms:
+            trade_count = len(oms.iter_trades())
+        else:
+            trade_count = len(Trade.get_trades_proxy())
         starting_capital_ratio = (total_bot / starting_capital) - 1 if starting_capital else 0.0
         starting_cap_fiat_ratio = (value_bot / starting_cap_fiat) - 1 if starting_cap_fiat else 0.0
 
@@ -907,7 +999,15 @@ class RPC:
         Handler for reload_trade_from_exchange.
         Reloads a trade from it's orders, should manual interaction have happened.
         """
-        trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
+        trade: Trade | None = None
+        if self._freqtrade.oms:
+            trade = self._freqtrade.oms.get_trade(trade_id)
+        if trade is None:
+            trade = None
+            if self._freqtrade.oms:
+                trade = self._freqtrade.oms.get_trade(trade_id)
+            if trade is None:
+                trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
         if not trade:
             raise RPCException(f"Could not find trade with id {trade_id}.")
 
@@ -978,19 +1078,28 @@ class RPC:
         with self._freqtrade._exit_lock:
             if trade_id == "all":
                 # Execute exit for all open orders
-                for trade in Trade.get_open_trades():
+                for trade in self._get_open_trades():
                     self.__exec_force_exit(trade, ordertype)
                 Trade.commit()
                 self._freqtrade.wallets.update()
                 return {"result": "Created exit orders for all open trades."}
 
             # Query for trade
-            trade = Trade.get_trades(
-                trade_filter=[
-                    Trade.id == trade_id,
-                    Trade.is_open.is_(True),
-                ]
-            ).first()
+            trade_obj: Trade | None = None
+            if self._freqtrade.oms:
+                try:
+                    trade_obj = self._freqtrade.oms.get_trade(int(trade_id))
+                except ValueError as exc:
+                    raise RPCException("invalid argument") from exc
+
+            if trade_obj is None:
+                trade_obj = Trade.get_trades(
+                    trade_filter=[
+                        Trade.id == trade_id,
+                        Trade.is_open.is_(True),
+                    ]
+                ).first()
+            trade = trade_obj
             if not trade:
                 logger.warning("force_exit: Invalid argument received")
                 raise RPCException("invalid argument")
@@ -1092,12 +1201,16 @@ class RPC:
             raise RPCException("trader is not running")
         with self._freqtrade._exit_lock:
             # Query for trade
-            trade = Trade.get_trades(
-                trade_filter=[
-                    Trade.id == trade_id,
-                    Trade.is_open.is_(True),
-                ]
-            ).first()
+            trade = None
+            if self._freqtrade.oms:
+                trade = self._freqtrade.oms.get_trade(trade_id)
+            if trade is None:
+                trade = Trade.get_trades(
+                    trade_filter=[
+                        Trade.id == trade_id,
+                        Trade.is_open.is_(True),
+                    ]
+                ).first()
             if not trade:
                 logger.warning("cancel_open_order: Invalid trade_id received.")
                 raise RPCException("Invalid trade_id.")
@@ -1113,6 +1226,8 @@ class RPC:
                     )
                 except ExchangeError as e:
                     logger.info(f"Cannot query order for {trade} due to {e}.", exc_info=True)
+            if self._freqtrade.oms:
+                self._freqtrade.oms.remove_trade(trade.id)
             trade.delete()
             Trade.commit()
 
@@ -1148,6 +1263,8 @@ class RPC:
                     except ExchangeError:
                         pass
             trade_pair = trade.pair
+            if self._freqtrade.oms:
+                self._freqtrade.oms.remove_trade(trade.id)
             trade.delete()
             self._freqtrade.wallets.update()
             return {
@@ -1264,7 +1381,7 @@ class RPC:
         if self._freqtrade.state == State.STOPPED:
             raise RPCException("trader is not running")
 
-        trades = Trade.get_open_trades()
+        trades = self._get_open_trades()
         return {
             "current": len(trades),
             "max": (
@@ -1286,8 +1403,31 @@ class RPC:
         total_collateral = 0.0
         total_unrealized_profit = 0.0
 
-        # Get all positions from wallets (now with refreshed data)
-        for symbol, position in self._freqtrade.wallets.get_all_positions().items():
+        state_reader = getattr(self._freqtrade, "state_reader", None)
+        state_sync = getattr(self._freqtrade, "state_sync", None)
+
+        positions_map: dict[str, PositionWallet]
+        if state_reader and state_sync:
+            state_sync.refresh_once()
+            snapshots = state_reader.positions()
+            positions_map = {
+                symbol: PositionWallet(
+                    symbol=symbol,
+                    position=snap.size,
+                    leverage=snap.leverage,
+                    collateral=snap.collateral,
+                    side=snap.side,
+                    unrealized_pnl=snap.unrealized_pnl,
+                    open_rate=snap.entry_price,
+                    notional_value=snap.extra.get("notional_value") if snap.extra else None,
+                )
+                for symbol, snap in snapshots.items()
+            }
+        else:
+            self._freqtrade.wallets.update()
+            positions_map = self._freqtrade.wallets.get_all_positions()
+
+        for symbol, position in positions_map.items():
             pos_info = {
                 "symbol": symbol,
                 "position": position.position,
@@ -1298,10 +1438,7 @@ class RPC:
                 "stake_currency": stake_currency,
             }
 
-            # Add position to list
             positions.append(pos_info)
-
-            # Add to totals
             total_collateral += position.collateral
             total_unrealized_profit += position.unrealized_pnl
 
@@ -1388,31 +1525,22 @@ class RPC:
             raise RPCException(f"Error while closing positions: {e}")
 
     def _rpc_open_orders(self) -> dict:
-        """Returns open orders from the exchange
-        
-        This method retrieves all open orders directly from the exchange
-        using the fetch_open_orders method.
-        """
-        orders: list[dict] = []
-
+        """Returns open orders, preferring the in-memory state manager when available."""
         if self._freqtrade.state == State.STOPPED:
             raise RPCException("trader is not running")
 
-        # Get all open orders from the exchange
+        state_orders = self._get_open_orders()
+        if state_orders is not None:
+            return {"orders": state_orders, "order_count": len(state_orders)}
+
+        orders: list[dict] = []
         open_orders = self._freqtrade.exchange.fetch_orders([])
-
-        # Enrich order data with trade information
         for order in open_orders:
-            # Find associated trade if possible
-            trade_id = None
-            order_obj = Order.order_by_id(str(order['id']))
+            order_obj = Order.order_by_id(str(order["id"]))
+            trade_id = order_obj.ft_trade_id if order_obj else None
+            order["ft_trade_id"] = trade_id
             if order_obj:
-                trade_id = order_obj.ft_trade_id
-                # Add order tag if available
-                order['ft_order_tag'] = order_obj.ft_order_tag
-
-            # Add trade ID to order data
-            order['ft_trade_id'] = trade_id
+                order["ft_order_tag"] = order_obj.ft_order_tag
             orders.append(order)
 
         return {

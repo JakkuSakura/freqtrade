@@ -19,6 +19,7 @@ from freqtrade.ft_types import BacktestHistoryEntryType, BacktestResultType
 from freqtrade.misc import file_dump_json, json_load
 from freqtrade.optimize.backtest_caching import get_backtest_metadata_filename
 from freqtrade.persistence import LocalTrade, Trade, init_db
+from freqtrade.persistence.history_repository import HistoryRepository, TradeHistory
 
 
 logger = logging.getLogger(__name__)
@@ -517,6 +518,59 @@ def trade_list_to_dataframe(trades: list[Trade] | list[LocalTrade]) -> pd.DataFr
     return df
 
 
+def trade_history_to_dataframe(entries: list[TradeHistory]) -> pd.DataFrame:
+    """Convert TradeHistory rows to a dataframe resembling backtest output."""
+
+    records: list[dict[str, Any]] = []
+    for entry in entries:
+        open_dt = entry.opened_at.astimezone(UTC) if entry.opened_at else None
+        close_dt = entry.closed_at.astimezone(UTC) if entry.closed_at else None
+        duration = (
+            (close_dt - open_dt).total_seconds() / 60 if open_dt and close_dt else None
+        )
+        is_short = (entry.direction or "long").lower() == "short"
+
+        records.append(
+            {
+                "pair": entry.pair,
+                "stake_amount": entry.stake_amount,
+                "max_stake_amount": entry.stake_amount,
+                "amount": entry.amount,
+                "open_date": open_dt,
+                "close_date": close_dt,
+                "open_rate": entry.open_rate,
+                "close_rate": entry.close_rate,
+                "fee_open": 0.0,
+                "fee_close": 0.0,
+                "trade_duration": duration,
+                "profit_ratio": entry.profit_ratio if entry.profit_ratio is not None else 0.0,
+                "profit_abs": entry.profit_abs if entry.profit_abs is not None else 0.0,
+                "exit_reason": entry.exit_reason,
+                "initial_stop_loss_abs": np.nan,
+                "initial_stop_loss_ratio": np.nan,
+                "stop_loss_abs": np.nan,
+                "stop_loss_ratio": np.nan,
+                "min_rate": np.nan,
+                "max_rate": np.nan,
+                "is_open": False,
+                "enter_tag": None,
+                "leverage": None,
+                "is_short": is_short,
+                "open_timestamp": int(open_dt.timestamp() * 1000) if open_dt else None,
+                "close_timestamp": int(close_dt.timestamp() * 1000) if close_dt else None,
+                "orders": [],
+                "funding_fees": 0.0,
+            }
+        )
+
+    df = pd.DataFrame.from_records(records, columns=BT_DATA_COLUMNS)
+    if len(df) > 0:
+        df["close_date"] = pd.to_datetime(df["close_date"], utc=True)
+        df["open_date"] = pd.to_datetime(df["open_date"], utc=True)
+        df["close_rate"] = df["close_rate"].astype("float64")
+    return df
+
+
 def load_trades_from_db(db_url: str, strategy: str | None = None) -> pd.DataFrame:
     """
     Load trades from a DB (using dburl)
@@ -528,8 +582,16 @@ def load_trades_from_db(db_url: str, strategy: str | None = None) -> pd.DataFram
     init_db(db_url)
 
     filters = []
+    history_filters = []
     if strategy:
         filters.append(Trade.strategy == strategy)
+
+        history_filters.append(TradeHistory.strategy == strategy)
+
+    history_entries = HistoryRepository.fetch_trades(history_filters)
+    if history_entries:
+        return trade_history_to_dataframe(history_entries)
+
     trades = trade_list_to_dataframe(list(Trade.get_trades(filters).all()))
 
     return trades
