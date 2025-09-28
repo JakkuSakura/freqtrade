@@ -1,6 +1,5 @@
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -384,3 +383,5 @@ def test_oms_submit_order_thread_safe(default_conf, mocker):
 
     snapshot = oms.snapshot()
     assert len(snapshot.orders) == 4
+
+    _clear_db()

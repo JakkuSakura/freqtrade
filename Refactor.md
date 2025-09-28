@@ -38,7 +38,7 @@
 1. **Phase 0 – Scaffold**
    - Add new `freqtrade/state/` and `freqtrade/oms/` packages with dataclasses, interfaces, and basic wiring.
    - Define DTOs for wallets, positions, orders, trades, forecasts.
-   - Introduce feature flag `state_manager.enabled` to guard new flow.
+   - Introduce feature flag `state_manager.enabled` to guard new flow. (Completed; flow now defaulted on.)
 
 2. **Phase 1 – Dual Read**
    - Hook `DataSyncService` to refresh balances/positions alongside current `Wallets` implementation.
@@ -67,7 +67,7 @@
 - **Performance Regressions**: Benchmark current vs new read paths; keep snapshots lightweight and avoid deep copies where unnecessary.
 
 ## Progress
-- ✅ State modules, event bus, and OMS skeleton created; feature flag added to schema/docs.
+- ✅ State modules, event bus, and OMS skeleton created; state manager now enabled by default with the legacy flag removed.
 - ✅ Wallet/position snapshots feed the state store; DataSync producers cover wallets, trades, and orders.
 - ✅ Added parity tests to ensure state-backed wallets/positions match legacy values.
 - ✅ RPC balance/position/status endpoints shadow state manager output with parity coverage.

@@ -222,6 +222,24 @@ def calculate_max_drawdown(
         if relative
         else max_drawdown_df["drawdown"].idxmin()
     )
+
+    if pd.isna(idxmin):
+        last_row = profit_results.iloc[-1]
+        last_cumulative = max_drawdown_df.iloc[-1]["cumulative"]
+        last_date = last_row[date_col]
+        return DrawDownResult(
+            drawdown_abs=0.0,
+            high_date=last_date,
+            low_date=last_date,
+            high_value=last_cumulative,
+            low_value=last_cumulative,
+            relative_account_drawdown=0.0,
+            current_high_date=last_date,
+            current_high_value=last_cumulative,
+            current_drawdown_abs=0.0,
+            current_relative_account_drawdown=0.0,
+        )
+
     high_idx = max_drawdown_df.iloc[: idxmin + 1]["high_value"].idxmax()
     high_date = profit_results.loc[high_idx, date_col]
     low_date = profit_results.loc[idxmin, date_col]
@@ -230,7 +248,10 @@ def calculate_max_drawdown(
     max_drawdown_rel = max_drawdown_df.loc[idxmin, "drawdown_relative"]
 
     # Calculate current drawdown
-    current_high_idx = max_drawdown_df["high_value"].iloc[:-1].idxmax()
+    if len(max_drawdown_df) <= 1 or max_drawdown_df["high_value"].iloc[:-1].empty:
+        current_high_idx = int(idxmin)
+    else:
+        current_high_idx = max_drawdown_df["high_value"].iloc[:-1].idxmax()
     current_high_date = profit_results.loc[current_high_idx, date_col]
     current_high_value = max_drawdown_df.iloc[-1]["high_value"]
     current_cumulative = max_drawdown_df.iloc[-1]["cumulative"]

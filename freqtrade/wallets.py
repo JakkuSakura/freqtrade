@@ -3,7 +3,7 @@
 
 import logging
 from datetime import datetime, timedelta
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, Optional, TYPE_CHECKING
 
 from freqtrade.constants import UNLIMITED_STAKE_AMOUNT, Config, IntOrInf
 from freqtrade.enums import RunMode, TradingMode
@@ -21,6 +21,9 @@ from freqtrade.state import (
 )
 from freqtrade.util.datetime_helpers import dt_now
 
+
+if TYPE_CHECKING:  # pragma: no cover
+    from freqtrade.state import DataSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,7 @@ class Wallets:
             is_backtest: bool = False,
             state_store: StateStore | None = None,
             state_reader: StateReader | None = None,
+            state_sync: Optional["DataSyncService"] = None,
     ) -> None:
         self._config = config
         self._is_backtest = is_backtest
@@ -61,6 +65,7 @@ class Wallets:
         self._start_cap: dict[str, float] = {}
         self._state_store = state_store
         self._state_reader = state_reader
+        self._state_sync = state_sync
 
         self._stake_currency = self._exchange.get_proxy_coin()
 
@@ -335,6 +340,32 @@ class Wallets:
                 )
             )
 
+    def _populate_from_state(self) -> None:
+        if not self._state_reader:
+            return
+
+        wallet_snaps = self._state_reader.wallets()
+        position_snaps = self._state_reader.positions()
+
+        self._wallets = {
+            currency: Wallet(currency, snap.free, snap.locked, snap.total)
+            for currency, snap in wallet_snaps.items()
+        }
+
+        positions: dict[str, PositionWallet] = {}
+        for symbol, snap in position_snaps.items():
+            positions[symbol] = PositionWallet(
+                symbol,
+                position=snap.size,
+                leverage=snap.leverage,
+                collateral=snap.collateral,
+                side=snap.side,
+                unrealized_pnl=snap.unrealized_pnl,
+                open_rate=snap.entry_price,
+                notional_value=snap.extra.get("notional_value") if snap.extra else None,
+            )
+        self._positions = positions
+
     def update(self, require_update: bool = True, *, publish_state: bool = True) -> None:
         """
         Updates wallets from the configured version.
@@ -344,6 +375,32 @@ class Wallets:
         :param require_update: Allow skipping an update if balances were recently refreshed
         """
         now = dt_now()
+
+        if self._state_reader:
+            if not publish_state:
+                if not self._config["dry_run"] or self._config.get("runmode") == RunMode.LIVE:
+                    self._update_live()
+                else:
+                    self._update_dry()
+                self._calculate_equity_and_update_usd_wallet()
+                self._last_wallet_refresh = dt_now()
+                return
+
+            needs_refresh = (
+                require_update
+                or self._last_wallet_refresh is None
+                or (self._last_wallet_refresh + timedelta(seconds=3600) < now)
+            )
+
+            if needs_refresh and self._state_sync:
+                self._state_sync.refresh_once()
+
+            self._populate_from_state()
+            self._calculate_equity_and_update_usd_wallet()
+            self._local_log("Wallets synced.")
+            self._last_wallet_refresh = dt_now()
+            return
+
         if (
                 require_update
                 or self._last_wallet_refresh is None
@@ -354,7 +411,7 @@ class Wallets:
             else:
                 self._update_dry()
             self._calculate_equity_and_update_usd_wallet()
-            if publish_state:
+            if publish_state and self._state_store:
                 self._publish_wallet_state()
             self._local_log("Wallets synced.")
             self._last_wallet_refresh = dt_now()
