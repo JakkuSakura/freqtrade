@@ -53,6 +53,7 @@ from freqtrade.rpc.api_server.api_schemas import (
     SysInfo,
     Version,
     WhitelistResponse,
+    OrdersResponse,
 )
 from freqtrade.rpc.api_server.deps import get_config, get_exchange, get_rpc, get_rpc_optional
 from freqtrade.rpc.rpc import RPCException
@@ -91,7 +92,8 @@ logger = logging.getLogger(__name__)
 # 2.41: Add download-data endpoint
 # 2.42: Add /pair_history endpoint with live data
 # 2.43: Add /profit_all endpoint
-API_VERSION = 2.43
+# 2.44: Add /orders endpoint
+API_VERSION = 2.44
 
 # Public API, requires no auth.
 router_public = APIRouter()
@@ -171,6 +173,11 @@ def profit_all(rpc: RPC = Depends(get_rpc), config=Depends(get_config)):
 @router.get("/stats", response_model=Stats, tags=["info"])
 def stats(rpc: RPC = Depends(get_rpc)):
     return rpc._rpc_stats()
+
+
+@router.get("/orders", response_model=OrdersResponse, tags=["info"])
+def orders(rpc: RPC = Depends(get_rpc)):
+    return rpc._rpc_open_orders()
 
 
 @router.get("/daily", response_model=DailyWeeklyMonthly, tags=["info"])

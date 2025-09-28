@@ -169,7 +169,7 @@ class Telegram(RPCHandler):
         """
         self._keyboard: list[list[str | KeyboardButton]] = [
             ["/daily", "/profit", "/balance", "/position"],
-            ["/status", "/status table", "/performance"],
+            ["/status", "/orders", "/status table", "/performance"],
             ["/count", "/start", "/stop", "/help"],
             ["/forceexit", "/forcexit2"],
         ]
@@ -183,6 +183,7 @@ class Telegram(RPCHandler):
             r"/stop$",
             r"/status$",
             r"/status table$",
+            r"/orders$",
             r"/trades$",
             r"/performance$",
             r"/buys",
@@ -2197,6 +2198,7 @@ class Telegram(RPCHandler):
             "         *table :* `will display trades in a table`\n"
             "                `pending buy orders are marked with an asterisk (*)`\n"
             "                `pending sell orders are marked with a double asterisk (**)`\n"
+            "*/orders:* `Shows all currently open orders tracked by this bot instance`\n"
             "*/entries <pair|none>:* `Shows the enter_tag performance`\n"
             "*/exits <pair|none>:* `Shows the exit reason performance`\n"
             "*/mix_tags <pair|none>:* `Shows combined entry tag + exit reason performance`\n"

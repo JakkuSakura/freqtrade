@@ -15,7 +15,7 @@ from numpy import inf, int64, isnan, mean, nan
 from pandas import DataFrame, NaT
 from sqlalchemy import func, select
 
-from freqtrade import __version__
+from freqtrade import __version__, constants
 from freqtrade.configuration.timerange import TimeRange
 from freqtrade.constants import CANCEL_REASON, DEFAULT_DATAFRAME_COLUMNS, Config
 from freqtrade.data.history import load_data
@@ -397,13 +397,17 @@ class RPC:
 
     def _get_open_orders(self) -> list[dict[str, Any]] | None:
         state_reader = getattr(self._freqtrade, "state_reader", None)
+        strategy_id = getattr(self._freqtrade, "strategy_identifier", None)
         if state_reader:
             snapshots = state_reader.orders()
             if snapshots:
                 orders: list[dict[str, Any]] = []
                 for snapshot in snapshots.values():
                     extra = snapshot.extra or {}
-                    remaining = snapshot.amount - snapshot.filled
+                    snap_strategy_id = extra.get("strategy_id")
+                    if snap_strategy_id and strategy_id and snap_strategy_id != strategy_id:
+                        continue
+                    remaining = (snapshot.amount or 0.0) - (snapshot.filled or 0.0)
                     orders.append(
                         {
                             "id": snapshot.order_id,
@@ -430,10 +434,11 @@ class RPC:
                                 snapshot.status not in constants.NON_OPEN_EXCHANGE_STATES,
                             ),
                             "ft_order_side": extra.get("ft_order_side", snapshot.side),
-                            "strategy_id": extra.get("strategy_id"),
+                            "strategy_id": snap_strategy_id,
                         }
                     )
                 return orders
+            return []
 
         return None
 
@@ -1530,24 +1535,60 @@ class RPC:
         if self._freqtrade.state == State.STOPPED:
             raise RPCException("trader is not running")
 
+        state_sync = getattr(self._freqtrade, "state_sync", None)
+        if state_sync:
+            state_sync.refresh_once()
+
         state_orders = self._get_open_orders()
         if state_orders is not None:
             return {"orders": state_orders, "order_count": len(state_orders)}
 
-        orders: list[dict] = []
-        open_orders = self._freqtrade.exchange.fetch_orders([])
-        for order in open_orders:
-            order_obj = Order.order_by_id(str(order["id"]))
-            trade_id = order_obj.ft_trade_id if order_obj else None
-            order["ft_trade_id"] = trade_id
-            if order_obj:
-                order["ft_order_tag"] = order_obj.ft_order_tag
-            orders.append(order)
+        oms = getattr(self._freqtrade, "oms", None)
+        if oms:
+            managed_orders = oms.iter_orders()
+            order_payload: list[dict[str, Any]] = []
+            strategy_id = getattr(self._freqtrade, "strategy_identifier", None)
+            closed_states = {state.lower() for state in constants.NON_OPEN_EXCHANGE_STATES}
+            for managed in managed_orders:
+                extra = managed.extra or {}
+                managed_strategy_id = extra.get("strategy_id")
+                if managed_strategy_id and strategy_id and managed_strategy_id != strategy_id:
+                    continue
 
-        return {
-            "orders": orders,
-            "order_count": len(orders),
-        }
+                remaining = (managed.amount or 0.0) - (managed.filled or 0.0)
+                placed_at = managed.placed_at
+                timestamp = int(placed_at.timestamp() * 1000) if placed_at else None
+                datetime_str = placed_at.isoformat() if placed_at else None
+
+                order_payload.append(
+                    {
+                        "id": managed.order_id,
+                        "trade_id": managed.trade_id,
+                        "symbol": managed.symbol,
+                        "price": managed.price,
+                        "amount": managed.amount,
+                        "filled": managed.filled,
+                        "remaining": remaining,
+                        "type": managed.type,
+                        "side": managed.side,
+                        "status": managed.status,
+                        "timestamp": timestamp,
+                        "datetime": datetime_str,
+                        "ft_order_tag": extra.get("order_tag"),
+                        "ft_trade_id": managed.trade_id,
+                        "is_entry": extra.get("is_entry"),
+                        "is_open": extra.get(
+                            "is_open",
+                            (managed.status or "open").lower() not in closed_states,
+                        ),
+                        "ft_order_side": extra.get("ft_order_side", managed.side),
+                        "strategy_id": managed_strategy_id,
+                    }
+                )
+
+            return {"orders": order_payload, "order_count": len(order_payload)}
+
+        return {"orders": [], "order_count": 0}
 
     def _rpc_locks(self) -> dict[str, Any]:
         """Returns the  current locks"""

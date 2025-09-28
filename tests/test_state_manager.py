@@ -314,6 +314,7 @@ def test_rpc_open_orders_parity_state_manager(mocker, default_conf):
         get_balances=MagicMock(return_value={"USDT": {"free": 700.0, "used": 0.0, "total": 700.0}}),
         fetch_positions=MagicMock(return_value=[]),
         fetch_ticker=MagicMock(return_value={"last": 1}),
+        fetch_open_orders=MagicMock(return_value=fetch_orders_payload),
         fetch_orders=MagicMock(return_value=fetch_orders_payload),
     )
 

@@ -279,6 +279,32 @@ class OrderSchema(BaseModel):
     ft_order_tag: str | None = None
 
 
+class OpenOrderEntry(BaseModel):
+    id: str | int | None
+    trade_id: int | str | None = None
+    symbol: str | None = None
+    price: float | None = None
+    amount: float | None = None
+    filled: float | None = None
+    remaining: float | None = None
+    type: str | None = None
+    side: str | None = None
+    status: str | None = None
+    timestamp: int | None = None
+    datetime: str | None = None
+    ft_order_tag: str | None = None
+    ft_trade_id: int | str | None = None
+    is_entry: bool | None = None
+    is_open: bool | None = None
+    ft_order_side: str | None = None
+    strategy_id: str | None = None
+
+
+class OrdersResponse(BaseModel):
+    order_count: int
+    orders: list[OpenOrderEntry]
+
+
 class TradeSchema(BaseModel):
     trade_id: int
     pair: str

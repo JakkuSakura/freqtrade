@@ -146,6 +146,22 @@ class OrderManagementService:
         with self._lock:
             return self._db_trades.get(trade_id)
 
+    def iter_orders(self, include_closed: bool = False) -> tuple[ManagedOrder, ...]:
+        """Return managed orders, optionally filtering out closed ones."""
+        with self._lock:
+            orders = tuple(self._orders.values())
+
+        if include_closed:
+            return orders
+
+        closed_states = {state.lower() for state in NON_OPEN_EXCHANGE_STATES}
+        return tuple(
+            order
+            for order in orders
+            if (order.status or "open").lower() not in closed_states
+            and order.extra.get("is_open", True)
+        )
+
     def submit_order(
         self,
         *,

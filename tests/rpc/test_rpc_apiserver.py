@@ -24,7 +24,7 @@ from freqtrade.enums import CandleType, RunMode, State, TradingMode
 from freqtrade.exceptions import DependencyException, ExchangeError, OperationalException
 from freqtrade.loggers import setup_logging, setup_logging_pre
 from freqtrade.optimize.backtesting import Backtesting
-from freqtrade.persistence import CustomDataWrapper, Trade
+from freqtrade.persistence import CustomDataWrapper, Order, Trade
 from freqtrade.rpc import RPC
 from freqtrade.rpc.api_server import ApiServer
 from freqtrade.rpc.api_server.api_auth import create_token, get_user_from_token
@@ -1408,6 +1408,40 @@ def test_api_stats(botclient, mocker, ticker, fee, markets, is_short):
     assert "wins" in rc.json()["durations"]
     assert "losses" in rc.json()["durations"]
     assert "draws" in rc.json()["durations"]
+
+
+def test_api_orders(botclient, fee, mocker):
+    ftbot, client = botclient
+    ftbot.state = State.RUNNING
+    patch_get_signal(ftbot)
+
+    create_mock_trades(fee)
+
+    open_order_objs = Order.get_open_orders()
+    assert open_order_objs
+    fetch_orders_payload = [order.to_ccxt_object() for order in open_order_objs]
+
+    mocker.patch.object(ftbot.exchange, "fetch_open_orders", MagicMock(return_value=fetch_orders_payload))
+    mocker.patch.object(ftbot.exchange, "fetch_orders", MagicMock(return_value=fetch_orders_payload))
+    mocker.patch.object(
+        ftbot.exchange,
+        "get_balances",
+        MagicMock(return_value={"USDT": {"free": 1000.0, "used": 0.0, "total": 1000.0}}),
+    )
+    mocker.patch.object(ftbot.exchange, "fetch_positions", MagicMock(return_value=[]))
+    mocker.patch.object(ftbot.exchange, "fetch_ticker", MagicMock(return_value={"last": 1}))
+
+    rc = client_get(client, f"{BASE_URI}/orders")
+    assert_response(rc)
+
+    response = rc.json()
+    assert response["order_count"] == len(fetch_orders_payload)
+    assert len(response["orders"]) == len(fetch_orders_payload)
+
+    order_payload = response["orders"][0]
+    assert order_payload["id"] == fetch_orders_payload[0]["id"]
+    assert order_payload["symbol"] == fetch_orders_payload[0]["symbol"]
+    assert order_payload.get("strategy_id") in (None, ftbot.strategy_identifier)
 
 
 def test_api_performance(botclient, fee):

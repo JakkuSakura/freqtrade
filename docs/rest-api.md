@@ -274,6 +274,9 @@ stats
 status
 	Get the status of open trades.
 
+orders
+	Get currently open orders managed by the bot.
+
 stop
 	Stop the bot. Use `start` to restart.
 
@@ -345,6 +348,7 @@ All endpoints in the below table need to be prefixed with the base URL of the AP
 | `/show_config` | GET | Shows part of the current configuration with relevant settings to operation.
 | `/logs` | GET | Shows last log messages.
 | `/status` | GET | Lists all open trades.
+| `/orders` | GET | Lists open orders tracked by this strategy instance.
 | `/count` | GET | Displays number of trades used and available.
 | `/entries` | GET | Shows profit statistics for each enter tags for given pair (or all pairs if pair isn't given). Pair is optional.<br/>*Params:*<br/>- `pair` (`str`) 
 | `/exits` | GET | Shows profit statistics for each exit reasons for given pair (or all pairs if pair isn't given). Pair is optional.<br/>*Params:*<br/>- `pair` (`str`) 

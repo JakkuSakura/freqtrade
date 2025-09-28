@@ -297,10 +297,9 @@ class FreqtradeBot(LoggingMixin):
         self.startup_update_open_orders()
 
         if self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN):
-            # Perform a full refresh of positions, orders, and trades at startup
-            logger.info("Performing full refresh of positions, orders, and trades at startup...")
-            # First verify trades against positions
-            self.verify_trades_against_positions()
+            # Perform a full refresh of balances, orders, and managed trades at startup
+            logger.info("Performing full refresh of balances and managed trades at startup...")
+            self.refresh_positions_orders_trades()
             # Then update liquidation prices and funding fees
             self.update_all_liquidation_prices()
             self.update_funding_fees()
@@ -396,181 +395,77 @@ class FreqtradeBot(LoggingMixin):
                 )
 
     def refresh_positions_orders_trades(self) -> None:
-        """
-        Refresh positions, orders and trades data from the exchange.
-        - Updates wallet balances
-        - Refreshes open orders
-        - Synchronizes trades with positions
-        """
+        """Refresh balances and managed orders without forcing trades to match global positions."""
         if self.config["dry_run"] or not (self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN)):
-            # Only applicable for futures/portfolio margin live trading
             return
 
         try:
             start_time = datetime.now(UTC)
-            logger.info("Performing periodic refresh of positions, orders, and trades...")
+            logger.info("Refreshing balances, orders, and strategy exposure...")
 
-            # Update wallets
+            # Pull the latest exchange view into the shared state cache first
+            self.state_sync.refresh_once()
+
+            # Update wallets for accounting purposes
             self.wallets.update()
 
-            # Refresh open orders using the in-memory OMS cache
+            managed_trades: tuple[Trade, ...] = self.oms.iter_trades()
+            trade_id_map = {str(trade.id): trade for trade in managed_trades}
+
+            order_snapshots = [
+                snapshot
+                for snapshot in self.state_reader.iter_orders()
+                if snapshot.trade_id
+                and snapshot.trade_id in trade_id_map
+                and (
+                    snapshot.extra.get("strategy_id") is None
+                    or snapshot.extra.get("strategy_id") == self.strategy_identifier
+                )
+            ]
+
+            if order_snapshots:
+                self.oms.reconcile_snapshot_orders(order_snapshots)
+
             updated_orders = 0
-            for trade in self.oms.iter_trades():
-                for order in trade.open_orders:
+            for trade in managed_trades:
+                self._ensure_trade_strategy_tag(trade)
+
+                snapshot_ids = {
+                    snap.order_id
+                    for snap in order_snapshots
+                    if snap.trade_id == str(trade.id)
+                }
+                live_order_ids = {
+                    order.order_id for order in list(trade.open_orders) + list(trade.open_sl_orders)
+                }
+                candidate_ids = {order_id for order_id in snapshot_ids | live_order_ids if order_id}
+
+                for order_id in candidate_ids:
                     try:
-                        self.update_trade_state(trade, order.order_id, send_msg=False)
+                        self.update_trade_state(trade, order_id, send_msg=False)
                         updated_orders += 1
-                    except Exception as e:
-                        logger.warning(f"Error updating order {order.order_id}: {e}")
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        logger.warning("Error updating order %s: %s", order_id, exc)
 
-            # Finally synchronize trades with exchange positions
-            self.verify_trades_against_positions()
+                self.oms.sync_trade(trade)
 
-            # Calculate execution time
             end_time = datetime.now(UTC)
             execution_time = (end_time - start_time).total_seconds()
 
-            # Send a status message to RPC
-            self.rpc.send_msg({
-                "type": RPCMessageType.STATUS,
-                "status": (f"Periodic refresh completed in {execution_time:.2f}s. "
-                           f"Updated {updated_orders} orders and synchronized positions with trades.")
-            })
+            status_msg = (
+                f"Periodic refresh completed in {execution_time:.2f}s. "
+                f"Updated {updated_orders} managed orders."
+            )
+            self.rpc.send_msg({"type": RPCMessageType.STATUS, "status": status_msg})
+            logger.info(status_msg)
 
-            logger.info(f"Periodic refresh completed in {execution_time:.2f}s. Updated {updated_orders} orders.")
-
+            # One more refresh so downstream consumers see the latest trade/order state
             self.state_sync.refresh_once()
-        except Exception as e:
-            logger.warning(f"Error during periodic refresh: {e}")
-            logger.exception(e)
+
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Error during periodic refresh: %s", exc)
+            logger.exception(exc)
             # Don't raise exceptions from scheduled tasks
-
-    def verify_trades_against_positions(self) -> None:
-        """
-        Perform a comprehensive synchronization between local trades and exchange positions:
-        1. Delete trades that don't have corresponding positions on the exchange
-        2. Update existing trades to match the current position details
-        3. Add new trades for positions that exist on the exchange but not in the database
-        
-        This ensures the bot's database is fully in sync with the exchange state.
-        """
-        if self.config["dry_run"] or not (self.trading_mode in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN)):
-            # Only applicable for futures/portfolio margin live trading
-            return
-
-        logger.info("Synchronizing local trades with exchange positions...")
-
-        try:
-            # First refresh positions to ensure we have the latest data
-            self.wallets.update()
-
-            # Fetch all open positions from the exchange
-            position_map = self.wallets.get_all_positions()
-
-            # Get all open trades from the OMS cache
-            trades: list[Trade] = list(self.oms.iter_trades())
-            trade_symbols = set()
-
-            created_trades: list[Trade] = []
-
-            # 1. Handle trades with no matching position - delete them
-            for trade in trades:
-                self._ensure_trade_strategy_tag(trade)
-                # Convert Freqtrade pair to exchange symbol
-                # Use the actual CCXT method for converting pairs
-                symbol = trade.pair
-                if symbol in trade_symbols:
-                    self.oms.remove_trade(trade.id)
-                    trade.delete()
-                    self.rpc.send_msg({
-                        "type": RPCMessageType.STATUS,
-                        "status": f"Deleted duplicate trade {trade.id} for {trade.pair}"
-                    })
-                    continue
-
-                trade_symbols.add(symbol)
-                if symbol not in position_map:
-                    # Send notification before deleting the trade
-                    self.rpc.send_msg({
-                        "type": RPCMessageType.STATUS,
-                        "status": f"Deleting trade {trade.id} for {trade.pair} as no matching position exists on exchange"
-                    })
-
-                    # Delete the trade and its orders from the database
-                    self.oms.remove_trade(trade.id)
-                    trade.delete()
-                    continue
-
-                # 2. Update existing trade to match position details
-                position = position_map[symbol]
-
-                # Update trade with position details
-                trade.amount = abs(position.position)
-                trade.open_rate = position.open_rate
-                # Make sure we maintain consistent is_short value
-                trade.is_short = position.side == 'short'
-                trade.recalc_open_trade_value()
-
-                self._sync_trade_state(trade)
-
-                self.rpc.send_msg({
-                    "type": RPCMessageType.STATUS,
-                    "status": f"Updated trade {trade.id} for {trade.pair} to match position size {trade.amount}"
-                })
-
-            # 3. Find positions without corresponding trades and create new trades
-            missing_positions = position_map.keys() - trade_symbols
-            for symbol in missing_positions:
-                position = position_map[symbol]
-                pair = symbol
-
-                # Create the trade object
-                trade = Trade(
-                    pair=pair,
-                    stake_amount=position.notional_value,  # Stake amount is estimated
-                    open_rate=position.open_rate,
-                    amount=position.position,
-                    open_date=datetime.now(UTC),  # We don't know the actual open time
-                    is_open=True,
-                    fee_open=self.exchange.get_fee(pair),
-                    fee_close=self.exchange.get_fee(pair),
-                    exchange=self.exchange.id,
-                    is_short=position.side == 'short',
-                    leverage=position.leverage,
-                    trading_mode=self.trading_mode,
-                    amount_precision=self.exchange.get_precision_amount(pair),
-                    price_precision=self.exchange.get_precision_price(pair),
-                    precision_mode=self.exchange.precisionMode,
-                    precision_mode_price=self.exchange.precision_mode_price,
-                    contract_size=self.exchange.get_contract_size(pair),
-                )
-
-                self._ensure_trade_strategy_tag(trade)
-
-                # Initialize stoploss
-                stoploss = self.strategy.stoploss
-                trade.adjust_stop_loss(trade.open_rate, stoploss, initial=True)
-
-                # Commit the trade to the database
-                Trade.session.add(trade)
-                created_trades.append(trade)
-
-                # Notify about the new trade
-                self.rpc.send_msg({
-                    "type": RPCMessageType.STATUS,
-                    "status": f"Created new trade for {pair} based on existing position. "
-                              f"Size: {abs(position.position)}, Rate: {position.open_rate}"
-                })
-
-            # Commit all changes to the database
-            Trade.commit()
-            for created_trade in created_trades:
-                self._sync_trade_state(created_trade)
-
-        except Exception as e:
-            logger.warning(f"Error synchronizing trades with positions: {e}")
-            logger.exception(e)
-            # Don't raise here - this is a verification step that shouldn't block startup
 
     def startup_backpopulate_precision(self) -> None:
         trades = Trade.get_trades([Trade.contract_size.is_(None)])
@@ -587,7 +482,7 @@ class FreqtradeBot(LoggingMixin):
     def startup_update_open_orders(self):
         """
         Updates open orders based on order list kept in the database.
-        Mainly updates the state of orders - but may also close trades
+        Mainly updates the state of orders - but may also close strategy-managed positions.
         """
         if self.config["dry_run"] or self.config["exchange"].get("skip_open_order_update", False):
             # Updating open orders in dry-run does not make sense and will fail.
@@ -1561,12 +1456,12 @@ class FreqtradeBot(LoggingMixin):
         self.rpc.send_msg(msg)
 
     #
-    # SELL / exit positions / close trades logic and methods
+    # SELL / exit positions / neutralize strategy exposure logic and methods
     #
 
     def exit_positions(self, trades: list[Trade]) -> int:
         """
-        Tries to execute exit orders for open trades (positions)
+        Attempt to execute exits that neutralize the strategy's outstanding exposure per trade.
         """
         trades_closed = 0
         for trade in trades:
@@ -1612,8 +1507,8 @@ class FreqtradeBot(LoggingMixin):
 
     def handle_trade(self, trade: Trade) -> bool:
         """
-        Exits the current pair if the threshold is reached and updates the trade record.
-        :return: True if trade has been sold/exited_short, False otherwise
+        Execute the strategy's exit flow for the given trade and update bookkeeping.
+        :return: True if the strategy exposure was fully neutralized, False otherwise
         """
         if not trade.is_open:
             raise DependencyException(f"Attempt to handle closed trade: {trade}")

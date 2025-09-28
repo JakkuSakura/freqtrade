@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from freqtrade import constants
 from freqtrade.persistence import Trade
 from freqtrade.state.dtos import (
     OrderSnapshot,
@@ -132,8 +133,26 @@ def make_exchange_orders_producer(exchange: "Exchange") -> SyncProducer:
 
     def _producer(context: SyncContext) -> SnapshotBundle:
         start = dt_now()
+        non_open_states = {
+            state.lower() if isinstance(state, str) else state
+            for state in constants.NON_OPEN_EXCHANGE_STATES
+        }
         try:
-            orders = exchange.fetch_open_orders([])
+            if getattr(exchange, "has", {}).get("fetchOpenOrders"):
+                orders = exchange.fetch_open_orders()
+            elif getattr(exchange, "has", {}).get("fetchOrders"):
+                orders = exchange.fetch_orders()
+                orders = [
+                    order
+                    for order in orders
+                    if (order.get("status") or "open").lower() not in non_open_states
+                ]
+            else:
+                logger.debug(
+                    "Exchange %s does not expose fetch_open_orders/fetch_orders APIs.",
+                    getattr(exchange, "id", "unknown"),
+                )
+                return SnapshotBundle()
         except Exception as exc:  # pragma: no cover - network/ccxt issues
             logger.warning("Failed to fetch open orders: %s", exc)
             return SnapshotBundle()
