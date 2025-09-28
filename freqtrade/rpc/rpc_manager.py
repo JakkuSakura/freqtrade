@@ -1,8 +1,7 @@
-"""
-This module contains class to manage RPC communications (Telegram, API, ...)
-"""
+"""RPC manager wiring plus log-forwarding handler."""
 
 import logging
+import traceback
 from collections import deque
 
 from freqtrade.constants import Config
@@ -14,6 +13,36 @@ from freqtrade.rpc.rpc_types import RPCSendMsg
 logger = logging.getLogger(__name__)
 
 
+class _RPCLogHandler(logging.Handler):
+    """Forward WARNING+/ERROR logs to RPC listeners (e.g., Telegram)."""
+
+    def __init__(self, manager: "RPCManager") -> None:
+        super().__init__(level=logging.WARNING)
+        self._manager = manager
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Avoid loops by skipping RPC's own logs
+        if record.name.startswith("freqtrade.rpc"):
+            return
+
+        try:
+            status = f"{record.levelname} - {record.name}: {record.getMessage()}"
+            if record.exc_info:
+                exc_text = "".join(traceback.format_exception(*record.exc_info)).strip()
+                status = f"{status}\n```{exc_text}```"
+
+            msg_type = (
+                RPCMessageType.EXCEPTION
+                if record.levelno >= logging.ERROR
+                else RPCMessageType.WARNING
+            )
+
+            self._manager.send_msg({"type": msg_type, "status": status})
+        except Exception:  # pragma: no cover - defensive
+            # Never let logging handlers raise
+            logging.getLogger(__name__).exception("Failed to emit RPC log message")
+
+
 class RPCManager:
     """
     Class to manage RPC objects (Telegram, API, ...)
@@ -23,6 +52,7 @@ class RPCManager:
         """Initializes all enabled rpc modules"""
         self.registered_modules: list[RPCHandler] = []
         self._rpc = RPC(freqtrade)
+        self._log_handler: _RPCLogHandler | None = None
         config = freqtrade.config
         # Enable telegram
         if config.get("telegram", {}).get("enabled", False):
@@ -54,9 +84,16 @@ class RPCManager:
             apiserver.add_rpc_handler(self._rpc)
             self.registered_modules.append(apiserver)
 
+        # Forward WARNING/ERROR logs to RPC recipients (Telegram, etc.)
+        self._log_handler = _RPCLogHandler(self)
+        logging.getLogger().addHandler(self._log_handler)
+
     def cleanup(self) -> None:
         """Stops all enabled rpc modules"""
         logger.info("Cleaning up rpc modules ...")
+        if self._log_handler:
+            logging.getLogger().removeHandler(self._log_handler)
+            self._log_handler = None
         while self.registered_modules:
             mod = self.registered_modules.pop()
             logger.info("Cleaning up rpc.%s ...", mod.name)
