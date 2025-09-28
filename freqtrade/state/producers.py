@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-from freqtrade.persistence import Order, Trade
+from freqtrade.persistence import Trade
 from freqtrade.state.dtos import (
     OrderSnapshot,
     PositionSnapshot,
@@ -15,10 +16,15 @@ from freqtrade.state.dtos import (
 )
 from freqtrade.state.sync_service import SyncContext
 from freqtrade.state.sync_service import SyncProducer
+from freqtrade.util import dt_from_ts
 from freqtrade.util.datetime_helpers import dt_now
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers only
+    from freqtrade.exchange import Exchange
     from freqtrade.wallets import Wallets
+
+
+logger = logging.getLogger(__name__)
 
 
 def make_wallets_producer(wallets: "Wallets") -> SyncProducer:
@@ -121,12 +127,17 @@ def make_open_trades_producer() -> SyncProducer:
     return _producer
 
 
-def make_open_orders_producer() -> SyncProducer:
-    """Return a producer that mirrors open orders into the state store."""
+def make_exchange_orders_producer(exchange: "Exchange") -> SyncProducer:
+    """Return a producer that pulls open orders directly from the exchange."""
 
     def _producer(context: SyncContext) -> SnapshotBundle:
         start = dt_now()
-        orders = Order.get_open_orders()
+        try:
+            orders = exchange.fetch_open_orders([])
+        except Exception as exc:  # pragma: no cover - network/ccxt issues
+            logger.warning("Failed to fetch open orders: %s", exc)
+            return SnapshotBundle()
+
         end = dt_now()
         latency = int((end - start).total_seconds() * 1000)
         meta = RefreshMeta(
@@ -136,32 +147,39 @@ def make_open_orders_producer() -> SyncProducer:
             sequence=context.sequence,
         )
 
-        order_snapshots = []
+        snapshots: list[OrderSnapshot] = []
         for order in orders:
-            order_snapshots.append(
+            info = order.get("info") or {}
+            order_id = str(order.get("id") or info.get("orderId"))
+            if not order_id:
+                continue
+            symbol = order.get("symbol") or info.get("symbol") or info.get("ft_pair")
+            placed_at = dt_from_ts(order.get("timestamp")) if order.get("timestamp") else end
+            status = order.get("status") or info.get("status") or "open"
+            trade_id = info.get("ft_trade_id") or order.get("clientOrderId")
+            extra = {
+                "order_tag": info.get("ft_order_tag"),
+                "is_entry": info.get("ft_is_entry"),
+                "is_open": status.lower() not in {"closed", "canceled", "cancelled"},
+                "ft_order_side": info.get("ft_order_side") or order.get("side"),
+            }
+            snapshots.append(
                 OrderSnapshot(
-                    order_id=order.order_id,
-                    trade_id=order.ft_trade_id,
-                    symbol=order.symbol or order.ft_pair,
-                    side=order.side or order.ft_order_side,
-                    type=order.order_type or "limit",
-                    price=order.safe_price,
-                    amount=order.safe_amount,
-                    filled=order.safe_filled,
-                    status=order.status or ("open" if order.ft_is_open else "closed"),
-                    placed_at=order.order_date_utc,
+                    order_id=order_id,
+                    trade_id=str(trade_id) if trade_id is not None else None,
+                    symbol=symbol,
+                    side=order.get("side") or info.get("ft_order_side") or "buy",
+                    type=order.get("type") or info.get("order_type") or "limit",
+                    price=order.get("price"),
+                    amount=order.get("amount") or 0.0,
+                    filled=order.get("filled") or 0.0,
+                    status=status,
+                    placed_at=placed_at,
                     meta=meta,
-                    extra={
-                        "order_tag": order.ft_order_tag,
-                        "is_entry": order.ft_order_side == order.trade.entry_side
-                        if order.trade
-                        else None,
-                        "is_open": order.ft_is_open,
-                        "ft_order_side": order.ft_order_side,
-                    },
+                    extra=extra,
                 )
             )
 
-        return SnapshotBundle(orders=tuple(order_snapshots))
+        return SnapshotBundle(orders=tuple(snapshots))
 
     return _producer

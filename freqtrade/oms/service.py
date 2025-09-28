@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping
 from freqtrade.constants import NON_OPEN_EXCHANGE_STATES
 from freqtrade.persistence import Order, Trade
 from freqtrade.persistence.history_repository import HistoryRepository
-from freqtrade.state import SnapshotBundle, StateStore
+from freqtrade.state import OrderSnapshot, SnapshotBundle, StateStore
 from freqtrade.util.datetime_helpers import dt_now
 
 from .types import ManagedOrder, ManagedTrade, build_trade_direction
@@ -46,6 +46,34 @@ class OrderManagementService:
     def bootstrap_trades(self, trades: Iterable[Trade]) -> None:
         for trade in trades:
             self.sync_trade(trade)
+
+    def reconcile_snapshot_orders(self, snapshots: Iterable[OrderSnapshot]) -> None:
+        """Populate the in-memory order cache using existing state snapshots."""
+        with self._lock:
+            for snapshot in snapshots:
+                if snapshot.order_id in self._orders:
+                    continue
+                trade_id: int | None = None
+                if snapshot.trade_id:
+                    try:
+                        trade_id = int(snapshot.trade_id)
+                    except ValueError:
+                        trade_id = None
+                managed = ManagedOrder(
+                    order_id=snapshot.order_id,
+                    trade_id=trade_id,
+                    symbol=snapshot.symbol,
+                    side=snapshot.side,
+                    type=snapshot.type,
+                    price=snapshot.price,
+                    amount=snapshot.amount,
+                    filled=snapshot.filled,
+                    status=snapshot.status,
+                    placed_at=snapshot.placed_at,
+                    updated_at=snapshot.meta.fetched_at if snapshot.meta else dt_now(),
+                    extra=dict(snapshot.extra) if snapshot.extra else {},
+                )
+                self._orders[snapshot.order_id] = managed
 
     def sync_trade(self, trade: Trade) -> None:
         """Refresh the managed state for a trade and its open orders."""

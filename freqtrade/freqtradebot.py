@@ -66,7 +66,7 @@ from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
 from freqtrade.util import FtPrecise, MeasureTime, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.migrations.binance_mig import migrate_binance_futures_names
 from freqtrade.state import DataSyncService, StateEvents, StateReader, StateStore
-from freqtrade.state.producers import make_wallets_producer
+from freqtrade.state.producers import make_exchange_orders_producer, make_wallets_producer
 from freqtrade.oms import OrderManagementService
 from freqtrade.wallets import Wallets
 from freqtrade.system.bot_scheduler import BotScheduler
@@ -151,7 +151,12 @@ class FreqtradeBot(LoggingMixin):
         self.strategy.wallets = self.wallets
 
         self.state_sync.register("wallets", make_wallets_producer(self.wallets))
+        self.state_sync.register("orders", make_exchange_orders_producer(self.exchange))
         self.state_sync.refresh_once()
+
+        initial_orders = self.state_reader.orders()
+        if initial_orders:
+            self.oms.reconcile_snapshot_orders(initial_orders.values())
 
         self.oms.bootstrap_trades(Trade.get_open_trades())
 
