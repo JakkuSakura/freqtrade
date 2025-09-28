@@ -430,6 +430,7 @@ class RPC:
                                 snapshot.status not in constants.NON_OPEN_EXCHANGE_STATES,
                             ),
                             "ft_order_side": extra.get("ft_order_side", snapshot.side),
+                            "strategy_id": extra.get("strategy_id"),
                         }
                     )
                 return orders

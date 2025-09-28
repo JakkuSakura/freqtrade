@@ -74,3 +74,12 @@
 - ✅ OrderManagementService now maintains live orders/trades and publishes them into the state store.
 - ✅ RPC trade/order endpoints consume the state cache with parity tests guarding legacy fallbacks.
 - ✅ Historical repository captures closed trades/orders in dedicated append-only tables.
+
+## Multi-Strategy Coordination Notes
+- Every live instance exposes a `strategy_id` (defaults to `bot_name::strategy_name`) that the OMS stamps onto trades and orders.
+- Instances now honour `strategy_id` from config or `FREQTRADE_STRATEGY_ID` env var; if neither is provided a short random suffix is appended to guarantee uniqueness per deployment.
+- State snapshots (`ManagedTrade.extra`, `ManagedOrder.extra`, RPC payloads) now surface `strategy_id`, enabling downstream tooling or additional bots to filter per-strategy state.
+- Multiple strategies on the same exchange account must run in separate processes/containers; OMS instances remain isolated and reconcile shared exchange state via the StateStore snapshots.
+- Expect tighter exchange rate limits when stacking strategies—budget refresh cadence (`DataSyncService`) and websocket subscriptions accordingly.
+- CCXT's advertised `rateLimit` is now logged at boot so clustered bots can be tuned against the exchange budget; keep per-bot throttle settings below that ceiling.
+- Follow-up: extend startup reconciliation (`startup_update_open_orders`) to use StateReader snapshots and add stress tests for concurrent state writers.

@@ -3,6 +3,7 @@ Freqtrade is the main module of this bot. It contains the class Freqtrade()
 """
 
 import logging
+import os
 import traceback
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,7 @@ from math import isclose
 from threading import Lock
 from time import sleep
 from typing import Any
+from uuid import uuid4
 
 from freqtrade import constants
 from freqtrade.configuration import remove_exchange_credentials, validate_config_consistency
@@ -110,7 +112,28 @@ class FreqtradeBot(LoggingMixin):
             self.config, exchange_config=exchange_config, load_leverage_tiers=True
         )
 
+        rate_limit_ms = getattr(getattr(self.exchange, "_api", None), "rateLimit", None)
+        if rate_limit_ms:
+            logger.info(
+                "Exchange rate limit reported by CCXT: %sms per request. Plan concurrency accordingly.",
+                rate_limit_ms,
+            )
+
         self.strategy: IStrategy = StrategyResolver.load_strategy(self.config)
+
+        default_strategy_id = f"{self.config.get('bot_name', 'freqtrade')}::{self.strategy.get_strategy_name()}"
+        env_strategy_id = (os.getenv("FREQTRADE_STRATEGY_ID") or "").strip()
+        configured_strategy_id = self.config.get("strategy_id")
+        generated_suffix = uuid4().hex[:8]
+        generated_strategy_id = f"{default_strategy_id}::{generated_suffix}"
+
+        self.strategy_identifier = (
+            env_strategy_id
+            or configured_strategy_id
+            or generated_strategy_id
+        )
+        self.config["strategy_id"] = self.strategy_identifier
+        logger.info("Using strategy identifier '%s'", self.strategy_identifier)
 
         # Check config consistency here since strategies can set certain options
         validate_config_consistency(config)
@@ -158,7 +181,10 @@ class FreqtradeBot(LoggingMixin):
         if initial_orders:
             self.oms.reconcile_snapshot_orders(initial_orders.values())
 
-        self.oms.bootstrap_trades(Trade.get_open_trades())
+        existing_trades = Trade.get_open_trades()
+        for trade in existing_trades:
+            self._ensure_trade_strategy_tag(trade)
+        self.oms.bootstrap_trades(existing_trades)
 
         # Init ExternalMessageConsumer if enabled
         self.emc = (
@@ -387,19 +413,15 @@ class FreqtradeBot(LoggingMixin):
             # Update wallets
             self.wallets.update()
 
-            # Refresh open orders
-            open_orders = Order.get_open_orders()
+            # Refresh open orders using the in-memory OMS cache
             updated_orders = 0
-            for order in open_orders:
-                # Skip orders without trades
-                if not order.trade:
-                    continue
-                try:
-                    # Update each order's status
-                    self.update_trade_state(order.trade, order.order_id, send_msg=False)
-                    updated_orders += 1
-                except Exception as e:
-                    logger.warning(f"Error updating order {order.order_id}: {e}")
+            for trade in self.oms.iter_trades():
+                for order in trade.open_orders:
+                    try:
+                        self.update_trade_state(trade, order.order_id, send_msg=False)
+                        updated_orders += 1
+                    except Exception as e:
+                        logger.warning(f"Error updating order {order.order_id}: {e}")
 
             # Finally synchronize trades with exchange positions
             self.verify_trades_against_positions()
@@ -445,14 +467,15 @@ class FreqtradeBot(LoggingMixin):
             # Fetch all open positions from the exchange
             position_map = self.wallets.get_all_positions()
 
-            # Get all open trades from the database
-            trades: list[Trade] = Trade.get_open_trades()
+            # Get all open trades from the OMS cache
+            trades: list[Trade] = list(self.oms.iter_trades())
             trade_symbols = set()
 
             created_trades: list[Trade] = []
 
             # 1. Handle trades with no matching position - delete them
             for trade in trades:
+                self._ensure_trade_strategy_tag(trade)
                 # Convert Freqtrade pair to exchange symbol
                 # Use the actual CCXT method for converting pairs
                 symbol = trade.pair
@@ -522,6 +545,8 @@ class FreqtradeBot(LoggingMixin):
                     contract_size=self.exchange.get_contract_size(pair),
                 )
 
+                self._ensure_trade_strategy_tag(trade)
+
                 # Initialize stoploss
                 stoploss = self.strategy.stoploss
                 trade.adjust_stop_loss(trade.open_rate, stoploss, initial=True)
@@ -568,8 +593,28 @@ class FreqtradeBot(LoggingMixin):
             # Updating open orders in dry-run does not make sense and will fail.
             return
 
-        orders = Order.get_open_orders()
-        logger.info(f"Updating {len(orders)} open orders.")
+        orders = [
+            order
+            for trade in self.oms.iter_trades()
+            for order in trade.open_orders
+            if getattr(order, "ft_is_open", True)
+        ]
+
+        if orders:
+            logger.info(
+                "Reconciling %d open orders from state store.",
+                len(orders),
+            )
+        else:
+            orders = Order.get_open_orders()
+            if not orders:
+                logger.info("No open orders found during startup reconciliation.")
+                return
+            logger.info(
+                "State snapshots empty, falling back to database with %d open orders.",
+                len(orders),
+            )
+
         for order in orders:
             # Skip orders without trades
             if not order.trade:
@@ -1203,13 +1248,19 @@ class FreqtradeBot(LoggingMixin):
             trade.adjust_stop_loss(trade.open_rate, stoploss, initial=True)
             Trade.session.add(trade)
             Trade.session.flush()
+            self._ensure_trade_strategy_tag(trade)
+            self.oms.register_trade(trade)
         else:
             trade.is_open = True
             trade.set_funding_fees(funding_fees)
+            self._ensure_trade_strategy_tag(trade)
+            self.oms.register_trade(trade)
 
         order_obj, order = self.oms.submit_order(
             exchange=self.exchange,
+            pair=pair,
             trade=trade,
+            trade_id=trade.id,
             order_type=order_type,
             side=side,
             amount=amount,
@@ -1218,6 +1269,7 @@ class FreqtradeBot(LoggingMixin):
             reduce_only=False,
             time_in_force=time_in_force,
             tag=enter_tag,
+            strategy_id=self.strategy_identifier,
         )
         order_id = order["id"]
         order_status = order.get("status")
@@ -2405,7 +2457,9 @@ class FreqtradeBot(LoggingMixin):
             # Execute sell and update trade record
             order_obj, order = self.oms.submit_order(
                 exchange=self.exchange,
+                pair=trade.pair,
                 trade=trade,
+                trade_id=trade.id,
                 order_type=order_type,
                 side=trade.exit_side,
                 amount=amount,
@@ -2415,6 +2469,7 @@ class FreqtradeBot(LoggingMixin):
                 in (TradingMode.FUTURES, TradingMode.PORTFOLIO_MARGIN),
                 time_in_force=time_in_force,
                 tag=exit_reason,
+                strategy_id=self.strategy_identifier,
             )
         except InsufficientFundsError as e:
             logger.warning(f"Unable to place order {e}.")
@@ -2568,7 +2623,12 @@ class FreqtradeBot(LoggingMixin):
     # Common update trade state methods
     #
 
+    def _ensure_trade_strategy_tag(self, trade: Trade) -> None:
+        if not getattr(trade, "strategy_identifier", None):
+            trade.strategy_identifier = self.strategy_identifier
+
     def _sync_trade_state(self, trade: Trade) -> None:
+        self._ensure_trade_strategy_tag(trade)
         self.oms.sync_trade(trade)
 
     def update_trade_state(

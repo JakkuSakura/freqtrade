@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
+from freqtrade.exceptions import DependencyException
 from freqtrade.constants import NON_OPEN_EXCHANGE_STATES
 from freqtrade.persistence import Order, Trade
 from freqtrade.persistence.history_repository import HistoryRepository
@@ -149,7 +150,7 @@ class OrderManagementService:
         self,
         *,
         exchange: "Exchange",
-        trade: Trade,
+        trade: Trade | None = None,
         order_type: str,
         side: str,
         amount: float,
@@ -158,11 +159,20 @@ class OrderManagementService:
         reduce_only: bool = False,
         time_in_force: str | None = None,
         tag: str | None = None,
+        strategy_id: str | None = None,
+        pair: str | None = None,
+        trade_id: int | None = None,
     ) -> tuple[Order, "CcxtOrder"]:
         """Submit a new order via the exchange and publish it into managed state."""
 
+        resolved_trade = trade or (self.get_trade(trade_id) if trade_id is not None else None)
+        if resolved_trade is None:
+            raise DependencyException("Order submission requires an active trade context.")
+
+        symbol = pair or resolved_trade.pair
+
         payload: dict[str, Any] = {
-            "pair": trade.pair,
+            "pair": symbol,
             "ordertype": order_type,
             "side": side,
             "amount": amount,
@@ -177,17 +187,31 @@ class OrderManagementService:
             payload["time_in_force"] = time_in_force
 
         order = exchange.create_order(**payload)
-        order_obj = Order.parse_from_ccxt_object(order, trade.pair, side, amount, price)
-        order_obj.ft_order_tag = tag
-        trade.orders.append(order_obj)
 
-        self.sync_trade(trade)
+        info = order.setdefault("info", {})
+        info.setdefault("ft_trade_id", resolved_trade.id)
+        info.setdefault("ft_order_tag", tag)
+        info.setdefault("ft_order_side", side)
+        info.setdefault("ft_is_entry", side == resolved_trade.entry_side)
+        if strategy_id or getattr(resolved_trade, "strategy_identifier", None):
+            info.setdefault(
+                "ft_strategy_id",
+                strategy_id or getattr(resolved_trade, "strategy_identifier", None),
+            )
+
+        order_obj = Order.parse_from_ccxt_object(order, symbol, side, amount, price)
+        order_obj.ft_order_tag = tag
+        if strategy_id:
+            order_obj.ft_strategy_id = strategy_id
+        resolved_trade.orders.append(order_obj)
+
+        self.sync_trade(resolved_trade)
 
         status = (order.get("status") or "").lower()
         if status in NON_OPEN_EXCHANGE_STATES:
-            self._record_order_event(trade, order_obj, status or "closed")
-            if not trade.is_open:
-                self._record_trade_close(trade)
+            self._record_order_event(resolved_trade, order_obj, status or "closed")
+            if not resolved_trade.is_open:
+                self._record_trade_close(resolved_trade)
 
         return order_obj, order
 
@@ -211,10 +235,20 @@ class OrderManagementService:
             leverage=trade.leverage,
         )
 
+        info = order.setdefault("info", {})
+        info.setdefault("ft_trade_id", trade.id)
+        info.setdefault("ft_order_tag", "stoploss")
+        info.setdefault("ft_order_side", trade.exit_side)
+        info.setdefault("ft_is_entry", False)
+        if getattr(trade, "strategy_identifier", None):
+            info.setdefault("ft_strategy_id", trade.strategy_identifier)
+
         order_obj = Order.parse_from_ccxt_object(
             order, trade.pair, "stoploss", amount, stop_price
         )
         order_obj.ft_order_tag = "stoploss"
+        if getattr(trade, "strategy_identifier", None):
+            order_obj.ft_strategy_id = trade.strategy_identifier
         trade.orders.append(order_obj)
 
         self.sync_trade(trade)
@@ -308,6 +342,9 @@ class OrderManagementService:
                 "is_entry": order.ft_order_side == trade.entry_side,
                 "is_open": order.ft_is_open,
                 "ft_order_side": order.ft_order_side,
+                "strategy_id": getattr(
+                    order, "ft_strategy_id", getattr(trade, "strategy_identifier", None)
+                ),
             },
         )
 
@@ -330,6 +367,7 @@ class OrderManagementService:
                 "enter_tag": trade.enter_tag,
                 "stop_loss": trade.stop_loss,
                 "strategy": trade.strategy,
+                "strategy_id": getattr(trade, "strategy_identifier", None),
                 "exit_reason": trade.exit_reason,
                 "nr_of_successful_entries": trade.nr_of_successful_entries,
                 "is_short": trade.is_short,

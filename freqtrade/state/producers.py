@@ -162,6 +162,7 @@ def make_exchange_orders_producer(exchange: "Exchange") -> SyncProducer:
                 "is_entry": info.get("ft_is_entry"),
                 "is_open": status.lower() not in {"closed", "canceled", "cancelled"},
                 "ft_order_side": info.get("ft_order_side") or order.get("side"),
+                "strategy_id": info.get("ft_strategy_id"),
             }
             snapshots.append(
                 OrderSnapshot(
