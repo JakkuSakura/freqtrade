@@ -195,6 +195,7 @@ CANCEL_REASON = {
     "FULLY_CANCELLED": "fully cancelled",
     "ALL_CANCELLED": "cancelled (all unfilled and partially filled open orders cancelled)",
     "CANCELLED_ON_EXCHANGE": "cancelled on exchange",
+    "UNFILLED_ENTRY": "cancelled - no filled entry orders",
     "FORCE_EXIT": "forcesold",
     "REPLACE": "cancelled to be replaced by new limit order",
     "REPLACE_FAILED": "failed to replace order, deleting Trade",

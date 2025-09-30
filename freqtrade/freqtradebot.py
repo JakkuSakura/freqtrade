@@ -1810,6 +1810,34 @@ class FreqtradeBot(LoggingMixin):
                     else:
                         self.replace_order(order, open_order, trade)
 
+        self._cleanup_unfilled_trades()
+
+    def _cleanup_unfilled_trades(self) -> None:
+        """Remove orphaned trades without filled entries or open orders."""
+        unfilled_reason = constants.CANCEL_REASON.get(
+            "UNFILLED_ENTRY", "cancelled - no filled entry orders"
+        )
+
+        for trade in Trade.get_open_trades():
+            if trade.nr_of_successful_entries > 0:
+                continue
+            if trade.has_open_orders or trade.has_open_sl_orders:
+                continue
+
+            logger.warning(
+                "Trade %s is open locally without filled entry orders. Force-closing entry.",
+                trade,
+            )
+
+            self._notify_enter_cancel(
+                trade,
+                order_type=self.strategy.order_types["entry"],
+                reason=unfilled_reason,
+            )
+
+            self.oms.remove_trade(trade.id)
+            trade.delete()
+
     def handle_cancel_order(
             self, order: CcxtOrder, order_obj: Order, trade: Trade, reason: str, replacing: bool = False
     ) -> bool:

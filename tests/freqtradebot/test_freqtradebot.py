@@ -1877,6 +1877,49 @@ def test_manage_open_orders_entry(
     assert freqtrade.strategy.adjust_entry_price.call_count == 0
 
 
+def test_cleanup_unfilled_trades(default_conf_usdt, mocker) -> None:
+    rpc_mock = patch_RPCManager(mocker)
+    patch_exchange(mocker)
+
+    freqtrade = FreqtradeBot(default_conf_usdt)
+
+    trade = Trade(
+        pair="ETH/USDT",
+        stake_amount=default_conf_usdt["stake_amount"],
+        amount=0.0,
+        amount_requested=default_conf_usdt["stake_amount"],
+        fee_open=0.001,
+        fee_close=0.001,
+        open_date=dt_now(),
+        is_open=True,
+        open_rate=1500.0,
+        exchange="binance",
+        strategy="StrategyTest",
+        timeframe=5,
+        is_short=False,
+    )
+
+    Trade.session.add(trade)
+    Trade.commit()
+
+    notify_spy = mocker.spy(freqtrade, "_notify_enter_cancel")
+    freqtrade.oms.remove_trade = MagicMock()
+    freqtrade.exchange.get_rate = MagicMock(return_value=trade.open_rate)
+    freqtrade.exchange.get_pair_base_currency = MagicMock(return_value="ETH")
+    freqtrade.exchange.get_pair_quote_currency = MagicMock(return_value="USDT")
+
+    freqtrade.manage_open_orders()
+
+    notify_spy.assert_called_once_with(
+        trade,
+        order_type=freqtrade.strategy.order_types["entry"],
+        reason=CANCEL_REASON["UNFILLED_ENTRY"],
+    )
+    freqtrade.oms.remove_trade.assert_called_once_with(trade.id)
+    assert rpc_mock.call_count == 1
+    assert Trade.get_open_trades() == []
+
+
 @pytest.mark.parametrize("is_short", [False, True])
 def test_adjust_entry_cancel(
     default_conf_usdt,
