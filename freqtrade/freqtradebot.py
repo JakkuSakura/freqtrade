@@ -72,7 +72,6 @@ from freqtrade.state.producers import make_exchange_orders_producer, make_wallet
 from freqtrade.oms import OrderManagementService
 from freqtrade.wallets import Wallets
 from freqtrade.system.bot_scheduler import BotScheduler
-from freqtrade.trading_loop import TradingLoop
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +238,6 @@ class FreqtradeBot(LoggingMixin):
             )
 
         self._measure_execution = MeasureTime(log_took_too_long, timeframe_secs * 0.25)
-        self._trading_loop = TradingLoop(self)
 
     def notify_status(self, msg: str, msg_type=RPCMessageType.STATUS) -> None:
         """
@@ -315,7 +313,40 @@ class FreqtradeBot(LoggingMixin):
         :return: True if one or more trades has been created or closed, False otherwise
         """
 
-        self._trading_loop.run_cycle()
+        self.exchange.reload_markets()
+        self.update_trades_without_assigned_fees()
+
+        trades: list[Trade] = Trade.get_open_trades()
+
+        self.active_pair_whitelist = self._refresh_active_whitelist(trades)
+
+        self.dataprovider.refresh(
+            self.pairlists.create_pair_list(self.active_pair_whitelist),
+            self.strategy.gather_informative_pairs(),
+        )
+
+        strategy_safe_wrapper(self.strategy.bot_loop_start, supress_error=True)(
+            current_time=datetime.now(UTC)
+        )
+
+        with self._measure_execution:
+            self.strategy.analyze(self.active_pair_whitelist)
+
+        with self._exit_lock:
+            self.manage_open_orders()
+
+        if self.strategy.position_adjustment_enable:
+            with self._exit_lock:
+                self.process_open_trade_positions()
+
+        if self.state == State.RUNNING and self.get_free_open_trades():
+            self.enter_positions()
+
+        self._scheduler.run_pending()
+        Trade.commit()
+        self.rpc.process_msg_queue(self.dataprovider._msg_queue)
+        self.last_process = datetime.now(UTC)
+
 
     def process_stopped(self) -> None:
         """
@@ -750,6 +781,7 @@ class FreqtradeBot(LoggingMixin):
                     if total == 0:
                         trade.close_date = dt_now()
                         trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
+                        trade.is_open = False
                         self.oms.remove_trade(trade.id)
                         trade.delete()
                         return True

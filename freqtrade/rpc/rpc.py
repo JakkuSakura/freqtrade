@@ -1044,6 +1044,39 @@ class RPC:
             if trade.has_open_orders:
                 # Order cancellation failed, so we can't exit.
                 return False
+
+            # Refresh trade from exchange in case the position was handled manually.
+            trade_deleted = False
+            try:
+                trade_deleted = self._freqtrade.handle_onexchange_order(trade)
+            except ExchangeError as exc:
+                logger.warning("Failed to reload trade %s from exchange: %s", trade, exc)
+            except Exception:
+                logger.exception("Unexpected error while reloading trade %s from exchange", trade)
+
+            if trade_deleted:
+                Trade.commit()
+                return True
+
+            refreshed_trade = Trade.get_trades(
+                trade_filter=[Trade.id == trade.id],
+            ).first()
+            if not refreshed_trade or not refreshed_trade.is_open:
+                Trade.commit()
+                return True
+
+            trade = refreshed_trade
+
+            if trade.amount <= constants.MATH_CLOSE_PREC:
+                # Trade exists locally but no longer has size - close it out.
+                trade.is_open = False
+                trade.close_date = dt_now()
+                trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
+                if self._freqtrade.oms:
+                    self._freqtrade.oms.remove_trade(trade.id)
+                trade.delete()
+                Trade.commit()
+                return True
             # Get current rate and execute sell
             current_rate = self._freqtrade.exchange.get_rate(
                 trade.pair, side="exit", is_short=trade.is_short, refresh=True
@@ -1053,15 +1086,22 @@ class RPC:
                 "force_exit", self._freqtrade.strategy.order_types["exit"]
             )
             sub_amount: float | None = None
-            if amount and amount < trade.amount:
-                # Partial exit ...
-                min_exit_stake = self._freqtrade.exchange.get_min_pair_stake_amount(
-                    trade.pair, current_rate, trade.stop_loss_pct or 0.0
-                )
-                remaining = (trade.amount - amount) * current_rate
-                if min_exit_stake and remaining < min_exit_stake:
-                    raise RPCException(f"Remaining amount of {remaining} would be too small.")
-                sub_amount = amount
+            if amount:
+                available_amount = trade.amount
+                if amount < available_amount:
+                    # Partial exit ...
+                    min_exit_stake = self._freqtrade.exchange.get_min_pair_stake_amount(
+                        trade.pair, current_rate, trade.stop_loss_pct or 0.0
+                    )
+                    remaining = (available_amount - amount) * current_rate
+                    if min_exit_stake and remaining < min_exit_stake:
+                        raise RPCException(
+                            f"Remaining amount of {remaining} would be too small."
+                        )
+                    sub_amount = amount
+                else:
+                    # Requested amount exceeds what we hold, fall back to full exit.
+                    sub_amount = None
 
             self._freqtrade.execute_trade_exit(
                 trade, current_rate, exit_check, ordertype=order_type, sub_trade_amt=sub_amount
