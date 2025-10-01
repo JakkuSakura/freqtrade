@@ -14,6 +14,7 @@ from dateutil.tz import tzlocal
 from numpy import inf, int64, isnan, mean, nan
 from pandas import DataFrame, NaT
 from sqlalchemy import func, select
+from sqlalchemy.exc import InvalidRequestError
 
 from freqtrade import __version__, constants
 from freqtrade.configuration.timerange import TimeRange
@@ -1049,20 +1050,30 @@ class RPC:
             trade_deleted = False
             try:
                 trade_deleted = self._freqtrade.handle_onexchange_order(trade)
+            except InvalidRequestError as exc:
+                logger.warning(
+                    "Trade %s is no longer attached to the current session while reloading: %s",
+                    trade,
+                    exc,
+                )
+                Trade.session.rollback()
+                return True
             except ExchangeError as exc:
                 logger.warning("Failed to reload trade %s from exchange: %s", trade, exc)
             except Exception:
                 logger.exception("Unexpected error while reloading trade %s from exchange", trade)
+                Trade.session.rollback()
+                return False
 
             if trade_deleted:
-                Trade.commit()
+                Trade.session.expire_all()
                 return True
 
             refreshed_trade = Trade.get_trades(
                 trade_filter=[Trade.id == trade.id],
             ).first()
             if not refreshed_trade or not refreshed_trade.is_open:
-                Trade.commit()
+                Trade.session.expire_all()
                 return True
 
             trade = refreshed_trade
@@ -1076,6 +1087,7 @@ class RPC:
                     self._freqtrade.oms.remove_trade(trade.id)
                 trade.delete()
                 Trade.commit()
+                Trade.session.expire_all()
                 return True
             # Get current rate and execute sell
             current_rate = self._freqtrade.exchange.get_rate(
