@@ -461,8 +461,7 @@ class Wallets:
             position = self._positions.get(trade.pair)
             if position is None:
                 # We don't own anything :O
-                self._local_log(f'No position found for trade {trade.id}, assuming 0 balance.', level="warning")
-                return True
+                return False
             wallet_amount = position.position
 
         if wallet_amount >= trade.amount:
@@ -471,16 +470,18 @@ class Wallets:
 
     def check_exit_amount(self, trade: Trade) -> bool:
         """
-        Checks if the exit amount is available in the wallet.
+        Checks if the exit amount is available has a total in the wallet.
         :param trade: Trade to check
         :return: True if the exit amount is available, False otherwise
         """
-        if not self._check_exit_amount(trade):
+        ok = self._check_exit_amount(trade)
+        if not ok:
             # Update wallets just to make sure
             self.update()
-            return self._check_exit_amount(trade)
-
-        return True
+            ok = self._check_exit_amount(trade)
+        if not ok:
+            self._local_log(f'No position found for trade {trade.id}, assuming 0 balance.', level="warning")
+        return ok
 
     def get_starting_balance(self) -> float:
         """

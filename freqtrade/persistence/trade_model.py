@@ -1748,12 +1748,14 @@ class Trade(ModelBase, LocalTrade):
         return value
 
     def delete(self) -> None:
-        for order in self.orders:
-            Order.session.delete(order)
+        persistent_trade = Trade.session.merge(self)
 
-        CustomDataWrapper.delete_custom_data(trade_id=self.id)
+        for order in list(persistent_trade.orders):
+            Trade.session.delete(order)
 
-        Trade.session.delete(self)
+        CustomDataWrapper.delete_custom_data(trade_id=persistent_trade.id)
+
+        Trade.session.delete(persistent_trade)
         Trade.commit()
 
     @staticmethod

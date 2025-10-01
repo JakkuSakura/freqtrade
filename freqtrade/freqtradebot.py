@@ -740,21 +740,19 @@ class FreqtradeBot(LoggingMixin):
                         self.oms.remove_trade(trade.id)
                         trade.delete()
                         return True
-                    if total > trade.amount * 0.98:
-                        logger.warning(
-                            f"{trade} has a total of {trade.amount} {trade.base_currency}, "
-                            f"but the Wallet shows a total of {total} {trade.base_currency}. "
-                            f"Adjusting trade amount to {total}. "
-                            "This may however lead to further issues."
-                        )
-                        trade.amount = total
-                    else:
-                        logger.warning(
-                            f"{trade} has a total of {trade.amount} {trade.base_currency}, "
-                            f"but the Wallet shows a total of {total} {trade.base_currency}. "
-                            "Refusing to adjust as the difference is too large. "
-                            "This may however lead to further issues."
-                        )
+                    logger.warning(
+                        f"{trade} has a total of {trade.amount} {trade.base_currency}, "
+                        f"but the Wallet shows a total of {total} {trade.base_currency}. "
+                        f"Adjusting trade amount to {total}. "
+                        "This may however lead to further issues."
+                    )
+                    trade.amount = total
+                    if total == 0:
+                        trade.close_date = dt_now()
+                        trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
+                        self.oms.remove_trade(trade.id)
+                        trade.delete()
+                        return True
                 if prev_trade_amount != trade.amount:
                     # Cancel stoploss on exchange if the amount changed
                     trade = self.cancel_stoploss_on_exchange(trade)
@@ -1810,34 +1808,6 @@ class FreqtradeBot(LoggingMixin):
                     else:
                         self.replace_order(order, open_order, trade)
 
-        self._cleanup_unfilled_trades()
-
-    def _cleanup_unfilled_trades(self) -> None:
-        """Remove orphaned trades without filled entries or open orders."""
-        unfilled_reason = constants.CANCEL_REASON.get(
-            "UNFILLED_ENTRY", "cancelled - no filled entry orders"
-        )
-
-        for trade in Trade.get_open_trades():
-            if trade.nr_of_successful_entries > 0:
-                continue
-            if trade.has_open_orders or trade.has_open_sl_orders:
-                continue
-
-            logger.warning(
-                "Trade %s is open locally without filled entry orders. Force-closing entry.",
-                trade,
-            )
-
-            self._notify_enter_cancel(
-                trade,
-                order_type=self.strategy.order_types["entry"],
-                reason=unfilled_reason,
-            )
-
-            self.oms.remove_trade(trade.id)
-            trade.delete()
-
     def handle_cancel_order(
             self, order: CcxtOrder, order_obj: Order, trade: Trade, reason: str, replacing: bool = False
     ) -> bool:
@@ -2153,10 +2123,21 @@ class FreqtradeBot(LoggingMixin):
             )
             if open_order_count < 1 and trade.nr_of_successful_entries == 0 and not replacing:
                 logger.info(f"{side} order fully cancelled. Removing {trade} from database.")
+                if order_obj.ft_cancel_reason:
+                    order_obj.ft_cancel_reason = (
+                        f"{order_obj.ft_cancel_reason}, {constants.CANCEL_REASON['FULLY_CANCELLED']}"
+                    )
+                else:
+                    order_obj.ft_cancel_reason = constants.CANCEL_REASON["FULLY_CANCELLED"]
                 self.oms.remove_trade(trade.id)
                 trade.delete()
-                order_obj.ft_cancel_reason += f", {constants.CANCEL_REASON['FULLY_CANCELLED']}"
             else:
+                if order_obj.ft_cancel_reason:
+                    order_obj.ft_cancel_reason = (
+                        f"{order_obj.ft_cancel_reason}, {constants.CANCEL_REASON['FULLY_CANCELLED']}"
+                    )
+                else:
+                    order_obj.ft_cancel_reason = constants.CANCEL_REASON["FULLY_CANCELLED"]
                 self.update_trade_state(trade, order_id, corder)
                 logger.info(f"{side} Order timeout for {trade}.")
         else:
