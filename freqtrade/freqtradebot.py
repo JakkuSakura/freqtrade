@@ -487,7 +487,7 @@ class FreqtradeBot(LoggingMixin):
                 f"Periodic refresh completed in {execution_time:.2f}s. "
                 f"Updated {updated_orders} managed orders."
             )
-            self.rpc.send_msg({"type": RPCMessageType.STATUS, "status": status_msg})
+            # self.rpc.send_msg({"type": RPCMessageType.STATUS, "status": status_msg})
             logger.info(status_msg)
 
             # One more refresh so downstream consumers see the latest trade/order state
